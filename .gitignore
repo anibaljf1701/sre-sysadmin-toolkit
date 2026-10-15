@@ -11,3 +11,6 @@ venv/
 .env
 .env.*
 !.env.example
+
+# AWS Lambda deployment packages
+*.zip
