@@ -540,9 +540,6 @@ sre-sysadmin-toolkit/
 │   │   └── ec2_scheduler_dynamo.py
 │   └── scheduler_tags/       # Scheduler basado en tags
 │       └── ec2_scheduler_tags.py
-└── .kiro/                    # Configuración Kiro (MCP)
-    └── settings/
-        └── mcp.json          # Configuración de servidores MCP
 ```
 
 ### Guías de Contribución
