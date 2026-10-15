@@ -105,6 +105,19 @@ Ambos schedulers comparten los requisitos de Python 3.8 o superior, `boto3`, AWS
 
 Cada modalidad tiene además un setup de solo lectura que valida acceso al servicio AWS requerido.
 
+#### Dependencias para desarrollo local
+
+Las dependencias compartidas de los schedulers están declaradas en `python_scripts/requirements.txt`. Instálalas en un entorno virtual antes de ejecutar o importar localmente los schedulers:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r python_scripts/requirements.txt
+./python_scripts/setup.sh
+```
+
+Las pruebas usan `unittest` y mocks de los servicios AWS, por lo que no necesitan instalar `boto3`. Los paquetes Lambda descritos aquí incluyen el código de la función y usan el `boto3` provisto por el runtime de AWS; el archivo de requisitos es para ejecución local.
+
 ### Opción A: selección por tags
 
 Archivo: `python_scripts/scheduler_tags/ec2_scheduler_tags.py`
