@@ -7,6 +7,7 @@ Herramientas independientes para automatizar tareas habituales de operación en 
 | Herramienta | Propósito | Implementación |
 | --- | --- | --- |
 | Rotación de logs | Comprime logs antiguos y los archiva en S3 | Bash |
+| Backup selectivo de RDS | Exporta tablas MySQL críticas a un archivo comprimido y purga copias locales con más de siete días | Bash, AWS Secrets Manager y Ansible |
 | Programación de instancias EC2 | Detiene instancias fuera del horario configurado y las inicia al comienzo de la jornada | AWS Lambda, con selección por tags o DynamoDB |
 
 ## Requisitos comunes
@@ -90,6 +91,69 @@ Ejecuta las pruebas desde la raíz del repositorio. Usan un directorio temporal 
 ```bash
 python3 bash_scripts/test_scripts.py
 ```
+
+## Backup selectivo de RDS
+
+Archivos: `bash_scripts/bd_table_backup.sh` y `ansible/setup_bd_backup.yml`.
+
+El playbook prepara un agente Jenkins Linux basado en Debian/Ubuntu: instala AWS CLI, `jq` y un cliente compatible con MySQL (`mysqldump`; según la distribución puede ser MariaDB), crea `/var/backups/rds`, instala el script y programa una purga diaria a las 03:00. Los archivos con al menos siete días completos se eliminan; la ejecución diaria puede hacer que permanezcan localmente hasta casi ocho días. El backup se ejecuta bajo demanda desde un stage de Jenkins y produce un dump comprimido de las tablas indicadas.
+
+### Requisitos y configuración
+
+- Un agente Jenkins Debian/Ubuntu con Ansible instalado en el controlador que ejecuta el playbook, inventario con el grupo `jenkins_agents` y un usuario existente llamado `jenkins`.
+- Conectividad de red desde el agente al endpoint reader de RDS/Aurora MySQL y permisos de Security Group para MySQL (normalmente TCP 3306).
+- Un rol de instancia o credenciales AWS disponibles para el usuario `jenkins`, con `secretsmanager:GetSecretValue` sobre el secreto. Si usa una clave KMS administrada por el cliente, también requiere `kms:Decrypt` sobre esa clave.
+- Un secreto JSON de Secrets Manager con las claves `username`, `password`, `reader_endpoint` y `dbname`.
+- El playbook usa `/var/backups/rds`; si se cambia `backup_dir`, debe coincidir con `BACKUP_DIR` usado al ejecutar el script.
+
+Despliega la configuración desde la raíz del repositorio (ajusta la ruta del inventario):
+
+```bash
+ansible-playbook -i /path/to/inventory ansible/setup_bd_backup.yml
+```
+
+El script requiere estas variables de entorno y falla antes del dump si falta alguna, una dependencia o un campo del secreto:
+
+| Variable | Ejemplo | Descripción |
+| --- | --- | --- |
+| `SECRET_ID` | `production/rds/credentials` | Nombre o ARN del secreto de Secrets Manager |
+| `REGION` | `us-east-1` | Región del secreto |
+| `BACKUP_DIR` | `/var/backups/rds` | Directorio local, existente y escribible |
+| `DB_TABLES` | `usuarios transacciones facturacion` | Tablas separadas por espacios |
+
+En Jenkins, invoca el script después de verificar el agente y antes del despliegue. El agente debe obtener las credenciales AWS mediante su rol, no mediante claves incrustadas en el pipeline:
+
+```groovy
+stage('Backup tablas críticas') {
+   steps {
+      sh '''
+         SECRET_ID=production/rds/credentials \
+         REGION=us-east-1 \
+         BACKUP_DIR=/var/backups/rds \
+         DB_TABLES="usuarios transacciones facturacion" \
+         /usr/local/bin/db_table_backup.sh
+      '''
+   }
+}
+```
+
+El artefacto queda como `db_business_tables_<fecha>_<pid>.sql.gz` en el agente; este flujo no lo copia a S3 ni a otro almacenamiento durable. Para restaurar un archivo aprobado sobre el endpoint writer y la base de datos destino, el usuario MySQL necesita permisos para crear y modificar las tablas incluidas:
+
+```bash
+BACKUP_FILE=/var/backups/rds/db_business_tables_TIMESTAMP_PID.sql.gz
+WRITER_ENDPOINT=your-writer-endpoint
+RESTORE_USER=restore_user
+DATABASE=your_database
+gzip -dc "$BACKUP_FILE" | mysql -h "$WRITER_ENDPOINT" -u "$RESTORE_USER" -p "$DATABASE"
+```
+
+### Límites operativos
+
+- Está dirigido a RDS MySQL/Aurora MySQL, no a PostgreSQL ni a servidores MariaDB. El script usa `mysqldump` y activa `--set-gtid-purged=OFF` solo cuando el cliente anuncia esa opción.
+- `--single-transaction` da una vista consistente para tablas InnoDB mientras no se ejecuten cambios DDL concurrentes; motores no transaccionales no tienen esa garantía.
+- Se consulta el reader endpoint, por lo que la réplica puede ir atrasada respecto del writer. Para un backup previo a un despliegue, confirma que ese retraso sea aceptable.
+- Es un dump lógico de las tablas listadas, no una instantánea de RDS ni un rollback automático. La restauración puede reemplazar las tablas incluidas y requerir orden o coordinación por claves foráneas y cambios de esquema.
+- El respaldo contiene datos sensibles. Protege el host y el directorio, limita quién puede restaurarlo y considera cifrado/almacenamiento externo si se necesita durabilidad o recuperación ante pérdida del agente.
 
 ## Programación de instancias EC2
 
@@ -245,7 +309,10 @@ Antes de habilitar las reglas programadas, invoca la Lambda con una acción cont
 sre-sysadmin-toolkit/
 ├── README.md
 ├── .gitignore
+├── ansible/
+│   └── setup_bd_backup.yml
 ├── bash_scripts/
+│   ├── bd_table_backup.sh
 │   ├── log_rotation_s3.sh
 │   ├── setup.sh
 │   └── test_scripts.py

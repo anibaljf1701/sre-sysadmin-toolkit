@@ -1,0 +1,43 @@
+---
+- name: Configurar entorno de Backup On-Demand para DB
+  hosts: jenkins_agents  # El grupo de inventario donde corren los pipelines
+  become: yes
+  vars:
+    backup_dir: "/var/backups/rds"
+    script_src: "../bash_scripts/bd_table_backup.sh"
+    script_dest: "/usr/local/bin/db_table_backup.sh"
+    backup_user: "jenkins" # El usuario que ejecutará el script en el pipeline
+
+  tasks:
+    - name: Instalar dependencias del sistema (MySQL client, AWS CLI, jq)
+      apt:
+        name:
+          - default-mysql-client
+          - awscli
+          - jq
+        state: present
+        update_cache: yes
+
+    - name: Crear directorio seguro para almacenamiento de backups
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: "{{ backup_user }}"
+        group: "{{ backup_user }}"
+        mode: '0750' # Solo Jenkins y root pueden ver estos datos sensibles
+
+    - name: Desplegar script de volcado de base de datos
+      copy:
+        src: "{{ script_src }}"
+        dest: "{{ script_dest }}"
+        owner: "{{ backup_user }}"
+        group: "{{ backup_user }}"
+        mode: '0750'
+
+    - name: Configurar purga automática de backups viejos (Ciclo de Vida)
+      cron:
+        name: "Purgar backups de Aurora mayores a 7 días"
+        minute: "0"
+        hour: "3" # Se ejecuta todos los días a las 3 AM
+        job: "find '{{ backup_dir }}' -type f -name '*.sql.gz' -mtime +6 -delete"
+        user: root
