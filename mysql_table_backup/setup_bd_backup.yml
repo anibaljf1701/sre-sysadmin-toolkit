@@ -4,7 +4,7 @@
   become: yes
   vars:
     backup_dir: "/var/backups/rds"
-    script_src: "../bash_scripts/bd_table_backup.sh"
+    script_src: "bd_table_backup.sh"
     script_dest: "/usr/local/bin/db_table_backup.sh"
     backup_user: "jenkins" # El usuario que ejecutará el script en el pipeline
 

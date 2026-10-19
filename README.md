@@ -25,7 +25,7 @@ cd sre-sysadmin-toolkit
 
 ## Rotación de logs en S3
 
-Script: `bash_scripts/log_rotation_s3.sh`
+Script: `log_rotation_s3/log_rotation_s3.sh`
 
 Busca archivos `*.log` con más de un día de antigüedad. Ejecuta la rotación cuando alcanza el umbral de archivos o cuando llega el día semanal configurado. Tras subir correctamente el archivo comprimido a S3, elimina los logs locales incluidos.
 
@@ -43,7 +43,7 @@ Valida los requisitos del host, la configuración AWS y el acceso al bucket. Def
 LOG_DIR=/var/log/nginx \
 S3_BUCKET=s3://company-logs/production \
 AWS_REGION=us-east-1 \
-./bash_scripts/setup.sh
+./log_rotation_s3/setup.sh
 ```
 
 El setup solo realiza comprobaciones de lectura; no crea recursos ni modifica archivos.
@@ -51,7 +51,7 @@ El setup solo realiza comprobaciones de lectura; no crea recursos ni modifica ar
 Haz ejecutable el script si el sistema de archivos no conserva el bit de ejecución:
 
 ```bash
-chmod +x bash_scripts/log_rotation_s3.sh
+chmod +x log_rotation_s3/log_rotation_s3.sh
 ```
 
 Configura las variables al ejecutarlo o expórtalas en el entorno:
@@ -73,7 +73,7 @@ LOG_DIR=/var/log/nginx \
 S3_BUCKET=s3://company-logs/production \
 AWS_REGION=us-east-1 \
 FILE_THRESHOLD=7 \
-./bash_scripts/log_rotation_s3.sh
+./log_rotation_s3/log_rotation_s3.sh
 ```
 
 Programa el comando con cron o con el scheduler de tu entorno. Una ejecución diaria suele ser suficiente; la decisión de rotar sigue dependiendo del umbral y del día semanal configurados. Los mensajes se guardan en `/tmp/log_rotation_YYYYMMDD.log`.
@@ -89,12 +89,12 @@ La identidad usada por AWS CLI necesita `s3:PutObject` sobre el prefijo de desti
 Ejecuta las pruebas desde la raíz del repositorio. Usan un directorio temporal y un comando `aws` simulado; no necesitan credenciales ni recursos AWS:
 
 ```bash
-python3 bash_scripts/test_scripts.py
+python3 log_rotation_s3/test_scripts.py
 ```
 
 ## Backup selectivo de RDS
 
-Archivos: `bash_scripts/bd_table_backup.sh` y `ansible/setup_bd_backup.yml`.
+Archivos: `mysql_table_backup/bd_table_backup.sh` y `mysql_table_backup/setup_bd_backup.yml`.
 
 El playbook prepara un agente Jenkins Linux basado en Debian/Ubuntu: instala AWS CLI, `jq` y un cliente compatible con MySQL (`mysqldump`; según la distribución puede ser MariaDB), crea `/var/backups/rds`, instala el script y programa una purga diaria a las 03:00. Los archivos con al menos siete días completos se eliminan; la ejecución diaria puede hacer que permanezcan localmente hasta casi ocho días. El backup se ejecuta bajo demanda desde un stage de Jenkins y produce un dump comprimido de las tablas indicadas.
 
@@ -109,7 +109,7 @@ El playbook prepara un agente Jenkins Linux basado en Debian/Ubuntu: instala AWS
 Despliega la configuración desde la raíz del repositorio (ajusta la ruta del inventario):
 
 ```bash
-ansible-playbook -i /path/to/inventory ansible/setup_bd_backup.yml
+ansible-playbook -i /path/to/inventory mysql_table_backup/setup_bd_backup.yml
 ```
 
 El script requiere estas variables de entorno y falla antes del dump si falta alguna, una dependencia o un campo del secreto:
@@ -164,27 +164,27 @@ Las Lambdas usan el runtime Python de AWS y `boto3`, disponible en el entorno La
 Ambos schedulers comparten los requisitos de Python 3.8 o superior, `boto3`, AWS CLI, credenciales válidas y región configurada. Compruébalos una vez:
 
 ```bash
-./python_scripts/setup.sh
+./ec2_scheduler/setup.sh
 ```
 
 Cada modalidad tiene además un setup de solo lectura que valida acceso al servicio AWS requerido.
 
 #### Dependencias para desarrollo local
 
-Las dependencias compartidas de los schedulers están declaradas en `python_scripts/requirements.txt`. Instálalas en un entorno virtual antes de ejecutar o importar localmente los schedulers:
+Las dependencias compartidas de los schedulers están declaradas en `ec2_scheduler/requirements.txt`. Instálalas en un entorno virtual antes de ejecutar o importar localmente los schedulers:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r python_scripts/requirements.txt
-./python_scripts/setup.sh
+python -m pip install -r ec2_scheduler/requirements.txt
+./ec2_scheduler/setup.sh
 ```
 
 Las pruebas usan `unittest` y mocks de los servicios AWS, por lo que no necesitan instalar `boto3`. Los paquetes Lambda descritos aquí incluyen el código de la función y usan el `boto3` provisto por el runtime de AWS; el archivo de requisitos es para ejecución local.
 
 ### Opción A: selección por tags
 
-Archivo: `python_scripts/scheduler_tags/ec2_scheduler_tags.py`
+Archivo: `ec2_scheduler/ec2_scheduler_tags.py`
 Handler: `ec2_scheduler_tags.lambda_handler`
 
 La Lambda busca instancias `running` para detener o `stopped` para iniciar y filtra por la clave y los valores de tag configurados.
@@ -192,8 +192,8 @@ La Lambda busca instancias `running` para detener o `stopped` para iniciar y fil
 Valida los requisitos específicos de EC2 y ejecuta las pruebas aisladas:
 
 ```bash
-./python_scripts/scheduler_tags/setup.sh
-python3 python_scripts/scheduler_tags/test_scripts.py
+./ec2_scheduler/setup_tags.sh
+python3 ec2_scheduler/test_tags.py
 ```
 
 Las pruebas usan respuestas EC2 y CloudWatch simuladas; no llaman a AWS.
@@ -201,9 +201,9 @@ Las pruebas usan respuestas EC2 y CloudWatch simuladas; no llaman a AWS.
 1. Empaqueta el código:
 
    ```bash
-   cd python_scripts/scheduler_tags
+   cd ec2_scheduler
    zip ec2_scheduler_tags.zip ec2_scheduler_tags.py
-   cd ../..
+   cd ..
    ```
 
 2. Crea la función Lambda desde la consola de AWS o con AWS CLI. Usa el ZIP generado, el handler `ec2_scheduler_tags.lambda_handler` y configura estas variables:
@@ -229,8 +229,8 @@ Las pruebas usan respuestas EC2 y CloudWatch simuladas; no llaman a AWS.
 
 Archivos:
 
-- `python_scripts/scheduler_dynamo/ec2_scheduler_dynamo.py`: inicia y detiene instancias registradas.
-- `python_scripts/scheduler_dynamo/ec2_auto_register.py`: registra instancias nuevas cuando se lanzan.
+- `ec2_scheduler/ec2_scheduler_dynamo.py`: inicia y detiene instancias registradas.
+- `ec2_scheduler/ec2_auto_register.py`: registra instancias nuevas cuando se lanzan.
 
 #### 1. Crear la tabla
 
@@ -239,7 +239,7 @@ Crea una tabla DynamoDB con clave de partición `InstanceId` de tipo `String`, s
 Comprueba acceso a la tabla y a EC2 antes de desplegar:
 
 ```bash
-./python_scripts/scheduler_dynamo/setup.sh
+./ec2_scheduler/setup_dynamo.sh
 ```
 
 #### 2. Desplegar las funciones
@@ -247,10 +247,10 @@ Comprueba acceso a la tabla y a EC2 antes de desplegar:
 Empaqueta cada archivo desde su directorio:
 
 ```bash
-cd python_scripts/scheduler_dynamo
+cd ec2_scheduler
 zip ec2_scheduler_dynamo.zip ec2_scheduler_dynamo.py
 zip ec2_auto_register.zip ec2_auto_register.py
-cd ../..
+cd ..
 ```
 
 Despliega dos funciones Lambda, cada una con el ZIP y handler correspondientes:
@@ -294,7 +294,7 @@ aws dynamodb put-item \
 Prueba el scheduler y el registro automático sin AWS:
 
 ```bash
-python3 python_scripts/scheduler_dynamo/test_scripts.py
+python3 ec2_scheduler/test_dynamo.py
 ```
 
 Las pruebas mockean las respuestas de DynamoDB, EC2 y CloudWatch.
@@ -309,22 +309,21 @@ Antes de habilitar las reglas programadas, invoca la Lambda con una acción cont
 sre-sysadmin-toolkit/
 ├── README.md
 ├── .gitignore
-├── ansible/
-│   └── setup_bd_backup.yml
-├── bash_scripts/
-│   ├── bd_table_backup.sh
+├── ec2_scheduler/
+│   ├── ec2_auto_register.py
+│   ├── ec2_scheduler_dynamo.py
+│   ├── ec2_scheduler_tags.py
+│   ├── requirements.txt
+│   ├── setup.sh
+│   ├── setup_dynamo.sh
+│   ├── setup_tags.sh
+│   ├── test_dynamo.py
+│   └── test_tags.py
+├── log_rotation_s3/
 │   ├── log_rotation_s3.sh
 │   ├── setup.sh
 │   └── test_scripts.py
-├── python_scripts/
-│   ├── setup.sh
-│   ├── scheduler_dynamo/
-│   │   ├── ec2_auto_register.py
-│   │   ├── ec2_scheduler_dynamo.py
-│   │   ├── setup.sh
-│   │   └── test_scripts.py
-│   └── scheduler_tags/
-│       ├── ec2_scheduler_tags.py
-│       ├── setup.sh
-│       └── test_scripts.py
+└── mysql_table_backup/
+   ├── bd_table_backup.sh
+   └── setup_bd_backup.yml
 ```

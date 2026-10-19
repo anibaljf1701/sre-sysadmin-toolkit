@@ -3,7 +3,7 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-"$script_dir/../setup.sh"
+"$script_dir/setup.sh"
 
 table_name="${DYNAMODB_TABLE:-ControlHorariosEC2}"
 aws_region="${AWS_REGION:-$(aws configure get region)}"
