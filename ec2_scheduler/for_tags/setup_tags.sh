@@ -3,7 +3,7 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-"$script_dir/setup.sh"
+"$script_dir/../setup.sh"
 
 tag_key="${TAG_KEY:-Environment}"
 aws_region="${AWS_REGION:-$(aws configure get region)}"

@@ -184,7 +184,7 @@ Las pruebas usan `unittest` y mocks de los servicios AWS, por lo que no necesita
 
 ### Opción A: selección por tags
 
-Archivo: `ec2_scheduler/ec2_scheduler_tags.py`
+Archivo: `ec2_scheduler/for_tags/ec2_scheduler_tags.py`
 Handler: `ec2_scheduler_tags.lambda_handler`
 
 La Lambda busca instancias `running` para detener o `stopped` para iniciar y filtra por la clave y los valores de tag configurados.
@@ -192,8 +192,8 @@ La Lambda busca instancias `running` para detener o `stopped` para iniciar y fil
 Valida los requisitos específicos de EC2 y ejecuta las pruebas aisladas:
 
 ```bash
-./ec2_scheduler/setup_tags.sh
-python3 ec2_scheduler/test_tags.py
+./ec2_scheduler/for_tags/setup_tags.sh
+python3 ec2_scheduler/for_tags/test_tags.py
 ```
 
 Las pruebas usan respuestas EC2 y CloudWatch simuladas; no llaman a AWS.
@@ -201,9 +201,9 @@ Las pruebas usan respuestas EC2 y CloudWatch simuladas; no llaman a AWS.
 1. Empaqueta el código:
 
    ```bash
-   cd ec2_scheduler
+   cd ec2_scheduler/for_tags
    zip ec2_scheduler_tags.zip ec2_scheduler_tags.py
-   cd ..
+   cd ../..
    ```
 
 2. Crea la función Lambda desde la consola de AWS o con AWS CLI. Usa el ZIP generado, el handler `ec2_scheduler_tags.lambda_handler` y configura estas variables:
@@ -229,8 +229,8 @@ Las pruebas usan respuestas EC2 y CloudWatch simuladas; no llaman a AWS.
 
 Archivos:
 
-- `ec2_scheduler/ec2_scheduler_dynamo.py`: inicia y detiene instancias registradas.
-- `ec2_scheduler/ec2_auto_register.py`: registra instancias nuevas cuando se lanzan.
+- `ec2_scheduler/for_dynamodb/ec2_scheduler_dynamo.py`: inicia y detiene instancias registradas.
+- `ec2_scheduler/for_dynamodb/ec2_auto_register.py`: registra instancias nuevas cuando se lanzan.
 
 #### 1. Crear la tabla
 
@@ -239,7 +239,7 @@ Crea una tabla DynamoDB con clave de partición `InstanceId` de tipo `String`, s
 Comprueba acceso a la tabla y a EC2 antes de desplegar:
 
 ```bash
-./ec2_scheduler/setup_dynamo.sh
+./ec2_scheduler/for_dynamodb/setup_dynamo.sh
 ```
 
 #### 2. Desplegar las funciones
@@ -247,10 +247,10 @@ Comprueba acceso a la tabla y a EC2 antes de desplegar:
 Empaqueta cada archivo desde su directorio:
 
 ```bash
-cd ec2_scheduler
+cd ec2_scheduler/for_dynamodb
 zip ec2_scheduler_dynamo.zip ec2_scheduler_dynamo.py
 zip ec2_auto_register.zip ec2_auto_register.py
-cd ..
+cd ../..
 ```
 
 Despliega dos funciones Lambda, cada una con el ZIP y handler correspondientes:
@@ -294,7 +294,7 @@ aws dynamodb put-item \
 Prueba el scheduler y el registro automático sin AWS:
 
 ```bash
-python3 ec2_scheduler/test_dynamo.py
+python3 ec2_scheduler/for_dynamodb/test_dynamo.py
 ```
 
 Las pruebas mockean las respuestas de DynamoDB, EC2 y CloudWatch.
@@ -310,15 +310,17 @@ sre-sysadmin-toolkit/
 ├── README.md
 ├── .gitignore
 ├── ec2_scheduler/
-│   ├── ec2_auto_register.py
-│   ├── ec2_scheduler_dynamo.py
-│   ├── ec2_scheduler_tags.py
 │   ├── requirements.txt
 │   ├── setup.sh
-│   ├── setup_dynamo.sh
-│   ├── setup_tags.sh
-│   ├── test_dynamo.py
-│   └── test_tags.py
+│   ├── for_dynamodb/
+│   │   ├── ec2_auto_register.py
+│   │   ├── ec2_scheduler_dynamo.py
+│   │   ├── setup_dynamo.sh
+│   │   └── test_dynamo.py
+│   └── for_tags/
+│       ├── ec2_scheduler_tags.py
+│       ├── setup_tags.sh
+│       └── test_tags.py
 ├── log_rotation_s3/
 │   ├── log_rotation_s3.sh
 │   ├── setup.sh
