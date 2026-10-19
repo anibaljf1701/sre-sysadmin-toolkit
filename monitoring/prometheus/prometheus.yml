@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'ec2_node_exporters'
+    metrics_path: '/metrics'
+    # Se pueden agregar N nodos parametrizados en esta lista
+    static_configs:
+      - targets:
+          - '10.0.1.50:9100'  # Instancia EC2 1
+          - '10.0.1.51:9100'  # Instancia EC2 2
+        labels:
+          environment: 'production'

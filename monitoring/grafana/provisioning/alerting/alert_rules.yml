@@ -1,0 +1,44 @@
+apiVersion: 1
+
+groups:
+  - name: system_resource_alerts
+    folder: Infrastructure
+    interval: 1m
+    rules:
+      - uid: high_resource_usage_85
+        title: "Alerta: Consumo de recursos > 85% por 5 min"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: Prometheus
+            model:
+              # Expresión PromQL parametrizada para evaluar CPU, RAM y Disco
+              expr: |
+                (
+                  (100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)) > 85
+                ) or (
+                  ((node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100) > 85
+                ) or (
+                  ((node_filesystem_size_bytes{mountpoint="/"} - node_filesystem_free_bytes{mountpoint="/"}) / node_filesystem_size_bytes{mountpoint="/"} * 100) > 85
+                )
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [85]
+        for: 5m # Evaluación constante durante 5 minutos
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alto consumo de recursos detectado en {{ $labels.instance }}"
+          description: "El recurso en la instancia {{ $labels.instance }} ha superado el umbral del 85% durante más de 5 minutos."
