@@ -303,6 +303,44 @@ Las pruebas mockean las respuestas de DynamoDB, EC2 y CloudWatch.
 
 Antes de habilitar las reglas programadas, invoca la Lambda con una acción controlada y confirma el resultado. Las funciones publican logs en CloudWatch Logs; las funciones scheduler también envían métricas a CloudWatch. Verifica que la selección de instancias sea correcta antes de permitir operaciones sobre recursos de producción.
 
+## Monitoring de instancias EC2
+
+La carpeta `monitoring/` levanta Prometheus y Grafana con Docker Compose. Prometheus recoge métricas de Node Exporter y Grafana aprovisiona un dashboard de CPU, RAM, disco y tráfico de red, además de alertas por CPU, RAM y disco superiores al 85% durante 5 minutos. El tráfico de red se muestra en bytes por segundo y no genera alertas porcentuales porque no se configura una capacidad de enlace de referencia.
+
+### Requisitos y configuración
+
+- Docker Engine con el plugin de Docker Compose.
+- Instancias Linux accesibles por red desde el host de Prometheus e inventario Ansible para desplegar Node Exporter.
+- Reglas de Security Group/NACL que permitan TCP 9100 desde el host de Prometheus a las instancias monitorizadas. No expongas el puerto 9100 a Internet.
+- Un servidor SMTP y una dirección de correo de destino.
+
+Desde el directorio `monitoring`, crea el archivo local de configuración y sustituye todos los valores de ejemplo, especialmente contraseñas, credenciales SMTP, destinatario, targets y entorno:
+
+```bash
+cd monitoring
+cp .env.example .env
+```
+
+`PROMETHEUS_TARGETS` es una lista separada por comas de `host:puerto` (por ejemplo, IPs privadas o nombres DNS resolubles desde el contenedor). `ENVIRONMENT` etiqueta las series para distinguir entornos.
+
+### Despliegue
+
+Ejecuta el playbook desde `monitoring/` con el inventario de las instancias objetivo:
+
+```bash
+ansible-playbook -i /path/to/inventory ansible/install_node_exporter.yml
+```
+
+La arquitectura se detecta automáticamente para `x86_64` y `aarch64` (Node Exporter `amd64` y `arm64`). Inicia los contenedores:
+
+```bash
+docker compose up -d
+```
+
+Grafana queda disponible en `http://localhost:3000` (o el puerto definido en `GRAFANA_PORT`; credenciales definidas en `.env`) y Prometheus en `http://localhost:9090` (o el puerto de `PROMETHEUS_PORT`). Verifica en Prometheus que todos los targets estén `UP`, y en Grafana que el dashboard aparezca en la carpeta `Infrastructure`. Para probar correo, confirma que el servidor SMTP permita el envío y que `ALERT_EMAIL_TO` sea correcto.
+
+Los puertos publicados por Compose escuchan en todas las interfaces por defecto. Limita el acceso a Grafana y Prometheus mediante firewall o security groups; si solo deben ser accesibles localmente, enlázalos a `127.0.0.1` o ponlos detrás de un proxy autenticado.
+
 ## Estructura del repositorio
 
 ```
@@ -325,6 +363,10 @@ sre-sysadmin-toolkit/
 │   ├── log_rotation_s3.sh
 │   ├── setup.sh
 │   └── test_scripts.py
+├── monitoring/
+│   ├── ansible/
+│   ├── grafana/
+│   └── prometheus/
 └── mysql_table_backup/
    ├── bd_table_backup.sh
    └── setup_bd_backup.yml

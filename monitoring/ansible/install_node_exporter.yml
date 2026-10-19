@@ -4,6 +4,7 @@
   become: yes
   vars:
     node_exporter_version: "1.6.1"
+    node_exporter_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
     node_exporter_port: "9100"
     node_exporter_user: "node_exporter"
 
@@ -17,7 +18,7 @@
 
     - name: Descargar binario oficial de Node Exporter
       get_url:
-        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz"
         dest: "/tmp/node_exporter.tar.gz"
 
     - name: Extraer binario
@@ -28,7 +29,7 @@
 
     - name: Mover binario a /usr/local/bin
       copy:
-        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}/node_exporter"
         dest: "/usr/local/bin/node_exporter"
         owner: "{{ node_exporter_user }}"
         group: "{{ node_exporter_user }}"
@@ -66,4 +67,4 @@
         state: absent
       loop:
         - "/tmp/node_exporter.tar.gz"
-        - "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64"
+        - "/tmp/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}"
