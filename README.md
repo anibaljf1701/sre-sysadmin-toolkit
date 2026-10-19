@@ -9,6 +9,7 @@ Herramientas independientes para automatizar tareas habituales de operación en 
 | Rotación de logs | Comprime logs antiguos y los archiva en S3 | Bash |
 | Backup selectivo de RDS | Exporta tablas MySQL críticas a un archivo comprimido y purga copias locales con más de siete días | Bash, AWS Secrets Manager y Ansible |
 | Programación de instancias EC2 | Detiene instancias fuera del horario configurado y las inicia al comienzo de la jornada | AWS Lambda, con selección por tags o DynamoDB |
+| Monitoring de instancias EC2 | Recopila métricas de sistema y ofrece dashboards y alertas por email | Prometheus, Grafana, Docker Compose y Ansible |
 
 ## Requisitos comunes
 
