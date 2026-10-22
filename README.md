@@ -31,13 +31,25 @@ Script: `big-log-reader/big_log_file_reader.py`
 
 Analiza logs de acceso grandes con un generador: lee y procesa una línea por vez, sin cargar el archivo completo en memoria. Informa el total de solicitudes válidas, líneas malformadas omitidas, errores HTTP 5xx, respuestas 404, las tres rutas más solicitadas y la ruta con más errores. Una línea inválida no detiene el análisis. No requiere instalar dependencias externas ni importar paquetes de terceros; usa exclusivamente la biblioteca estándar de Python.
 
-Ejecuta el script indicando un archivo de log existente:
+El formato predeterminado cubre access logs comunes o combinados de Apache y Nginx, con timestamp entre corchetes y solicitud/estado en los campos habituales. Puedes filtrar por intervalo inclusivo (fechas ISO-8601 con zona horaria) y por ruta exacta:
 
 ```bash
-python3 big-log-reader/big_log_file_reader.py /var/log/nginx/access.log
+python3 big-log-reader/big_log_file_reader.py /var/log/nginx/access.log \
+   --from 2026-10-22T00:00:00Z \
+   --to 2026-10-22T23:59:59Z \
+   --route /api/search
 ```
 
-El parser espera líneas compatibles con el formato de access log de Apache que incluye la solicitud y el estado HTTP entre los campos habituales. El archivo se recorre en streaming, pero los contadores conservan una entrada por cada ruta distinta; por eso el uso de memoria no depende del tamaño total del log, aunque sí de la cardinalidad de rutas. La medición de memoria usa `tracemalloc` y añade algo de sobrecarga durante el análisis.
+Para otro formato, proporciona una regex con grupos nombrados `timestamp`, `route` y `status`, junto con el formato de fecha reconocido por `datetime.strptime`:
+
+```bash
+python3 big-log-reader/big_log_file_reader.py custom.log \
+   --format-regex '(?P<timestamp>[^|]+)\|(?P<route>[^|]+)\|(?P<status>\d{3})' \
+   --timestamp-format '%Y-%m-%dT%H:%M:%S%z' \
+   --route /api/search
+```
+
+Cuando se filtra por período, el timestamp del formato debe incluir una zona horaria (`%z`). El archivo se recorre en streaming, pero los contadores conservan una entrada por cada ruta distinta; por eso el uso de memoria no depende del tamaño total del log, aunque sí de la cardinalidad de rutas. La medición de memoria usa `tracemalloc` y añade algo de sobrecarga durante el análisis.
 
 En el script quedaron comentados el generador de archivos sintéticos y la variante que guarda todas las solicitudes en una lista. Son ejemplos de prueba para comparar el comportamiento y el consumo de memoria, no forman parte del flujo normal. La idea original y parte del proyecto están inspiradas en [Daily Python Projects](https://dailypythonprojects.substack.com/).
 

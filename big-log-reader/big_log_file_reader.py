@@ -3,22 +3,34 @@ Un servidor web escribe una línea en su registro de acceso por cada página
 que sirve. En un sitio con mucho tráfico, ese archivo puede crecer hasta
 ocupar varios gigabytes. Si guardas todas las líneas en una lista, Python
 mantiene el archivo entero en memoria. En cambio, un generador entrega una
-    línea a la vez, por lo que la memoria no crece con el tamaño del archivo.
-    Los contadores sí ocupan memoria según la cantidad de rutas distintas.
+línea a la vez, por lo que la memoria no crece con el tamaño del archivo.
+Los contadores sí ocupan memoria según la cantidad de rutas distintas.
 
 
 EJECUCIÓN
-    python3 {script_name} access.log          lo analiza línea por línea
+    python3 big_log_file_reader.py access.log [opciones]
+    --from/--to                  filtran por intervalo ISO-8601
+    --route                      filtra por ruta exacta
+    --format-regex/--timestamp-format configuran otro formato de log
 
 No requiere paquetes externos: usa únicamente la biblioteca estándar de Python.
 La generación de muestras y la lectura con listas quedan comentadas en el
 código como material de prueba y comparación.
 """
 
-import sys
+import argparse
+import re
 import tracemalloc
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
+
+DEFAULT_LOG_PATTERN = (
+    r'\[(?P<timestamp>[^\]]+)\]\s+'
+    r'"\S+\s+(?P<route>\S+)\s+\S+"\s+'
+    r'(?P<status>\d{3})(?:\s|$)'
+)
+DEFAULT_TIMESTAMP_FORMAT = "%d/%b/%Y:%H:%M:%S %z"
 
 # Datos y dependencias usados solo por el generador de logs de prueba:
 # import random
@@ -57,33 +69,34 @@ from pathlib import Path
 #                f'{status} {rnd.randrange(200, 60000)} "-" "{rnd.choice(BROWSERS)}"\n')
 
 
-def parse(line):
-    """Extrae página y estado, o devuelve None si la línea no es válida."""
-    parts = line.split('"')             # la solicitud y el navegador están entre comillas
-    if len(parts) < 3:
+def parse(line, pattern, timestamp_format):
+    """Extrae fecha, ruta y estado; devuelve None si la línea no coincide."""
+    match = pattern.search(line)
+    if match is None:
         return None
 
-    request = parts[1].split()
-    status_fields = parts[2].split()
-    if len(request) != 3 or not request[0] or not request[1] or not request[2].startswith("HTTP/"):
+    fields = match.groupdict()
+    if not all(fields.get(name) for name in ("timestamp", "route", "status")):
         return None
-    if not status_fields or not status_fields[0].isdigit() or len(status_fields[0]) != 3:
+    if not fields["status"].isdigit() or len(fields["status"]) != 3:
         return None
 
-    status_code = int(status_fields[0])
+    status_code = int(fields["status"])
     if not 100 <= status_code <= 599:
         return None
 
-    page = request[1]
-    status = status_fields[0]
-    return page, status
+    try:
+        timestamp = datetime.strptime(fields["timestamp"], timestamp_format)
+    except ValueError:
+        return None
+    return timestamp, fields["route"], fields["status"]
 
 
-def read_requests(path):
+def read_requests(path, pattern, timestamp_format):
     """Generador de solicitudes; entrega None para líneas malformadas."""
     with open(path) as f:
         for line in f:                  # lee el archivo una línea a la vez
-            yield parse(line)
+            yield parse(line, pattern, timestamp_format)
 
 
 # Código de comparación, desactivado: conserva todas las solicitudes en una
@@ -96,15 +109,21 @@ def read_requests(path):
 #     return requests
 
 
-def report(requests):
+def report(requests, start=None, end=None, route=None):
     """Resume solicitudes válidas e informa cuántas líneas se descartaron."""
-    total, not_found, malformed = 0, 0, 0
+    total, not_found, malformed, filtered = 0, 0, 0, 0
     pages, errors = Counter(), Counter()
     for request in requests:
         if request is None:
             malformed += 1
             continue
-        page, status = request
+        timestamp, page, status = request
+        if (start is not None and timestamp < start) or (end is not None and timestamp > end):
+            filtered += 1
+            continue
+        if route is not None and page != route:
+            filtered += 1
+            continue
         total += 1
         pages[page] += 1
         if status.startswith("5"):
@@ -113,6 +132,7 @@ def report(requests):
             not_found += 1
     print(f"  Requests:      {total:>11,}")
     print(f"  Malformed lines:{malformed:>10,}   (skipped)")
+    print(f"  Filtered out:  {filtered:>11,}")
     print(f"  Server errors: {sum(errors.values()):>11,}   (status 5xx)")
     print(f"  Not found:     {not_found:>11,}   (status 404)")
     print("  Busiest pages:")
@@ -135,8 +155,40 @@ def report(requests):
 
 
 def main():
-    args = sys.argv[1:]
-    script_name = Path(sys.argv[0]).name  # Obtiene dinámicamente el nombre del script
+    parser = argparse.ArgumentParser(
+        description="Analiza access logs grandes sin cargarlos completos en memoria."
+    )
+    parser.add_argument("logfile", type=Path, help="archivo de log que se analizará")
+    parser.add_argument(
+        "--format-regex",
+        default=DEFAULT_LOG_PATTERN,
+        help=(
+            "regex con grupos nombrados timestamp, route y status; el predeterminado "
+            "cubre formatos access comunes/combinados de Apache y Nginx"
+        ),
+    )
+    parser.add_argument(
+        "--timestamp-format",
+        default=DEFAULT_TIMESTAMP_FORMAT,
+        help="formato strptime para el grupo timestamp (predeterminado: Apache/Nginx)",
+    )
+    parser.add_argument("--from", dest="start", type=parse_iso_datetime, help="inicio inclusivo ISO-8601")
+    parser.add_argument("--to", dest="end", type=parse_iso_datetime, help="fin inclusivo ISO-8601")
+    parser.add_argument("--route", help="filtrar por coincidencia exacta de ruta")
+    args = parser.parse_args()
+
+    if args.start is not None and args.end is not None and args.start > args.end:
+        parser.error("--from debe ser anterior o igual a --to")
+    if (args.start is not None or args.end is not None) and "%z" not in args.timestamp_format:
+        parser.error("--timestamp-format debe incluir %z cuando se filtra por período")
+    try:
+        pattern = re.compile(args.format_regex)
+    except re.error as error:
+        parser.error(f"regex inválida: {error}")
+    required_groups = {"timestamp", "route", "status"}
+    if not required_groups.issubset(pattern.groupindex):
+        parser.error("la regex debe definir los grupos nombrados timestamp, route y status")
+
     # CLI de prueba, desactivado: descomentar junto con `make_sample` para
     # generar datos, o con `load_requests` para comparar lectura con lista.
     # if args[:1] == ["--sample"]:
@@ -144,19 +196,31 @@ def main():
     # path, use_list = Path(args[0]), "--list" in args
     # requests = load_requests(path) if use_list else read_requests(path)
     # report(requests)
-    if not args:
-        raise SystemExit(
-            f"Usage: python3 {script_name} access.log"
-        )
-    path = Path(args[0])
-    if not path.exists():
-        raise SystemExit(f"{path} not found")
+    path = args.logfile
+    if not path.is_file():
+        parser.error(f"{path} no es un archivo existente")
 
     print(f"Reading {path} ({path.stat().st_size / 1e9:.2f} GB) with a generator...")
     tracemalloc.start()                 # mide la memoria a partir de aquí (esto ralentiza Python)
-    report(read_requests(path))
+    report(
+        read_requests(path, pattern, args.timestamp_format),
+        start=args.start,
+        end=args.end,
+        route=args.route,
+    )
     peak = tracemalloc.get_traced_memory()[1]
     print(f"  Peak memory:   {peak / 1e6:>11,.2f} MB")
+
+
+def parse_iso_datetime(value):
+    """Parsea fecha ISO-8601 con zona horaria para filtros no ambiguos."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"fecha ISO-8601 inválida: {value}") from error
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("la fecha debe incluir zona horaria, por ejemplo +00:00 o Z")
+    return parsed
 
 
 if __name__ == "__main__":
