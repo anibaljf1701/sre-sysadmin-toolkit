@@ -49,7 +49,11 @@ python3 big-log-reader/big_log_file_reader.py custom.log \
    --route /api/search
 ```
 
-Cuando se filtra por período, el timestamp del formato debe incluir una zona horaria (`%z`). El archivo se recorre en streaming, pero los contadores conservan una entrada por cada ruta distinta; por eso el uso de memoria no depende del tamaño total del log, aunque sí de la cardinalidad de rutas. La medición de memoria usa `tracemalloc` y añade algo de sobrecarga durante el análisis.
+Cuando se filtra por período, el timestamp del formato debe incluir una zona horaria (`%z`). El archivo se recorre en streaming, pero los contadores conservan una entrada por cada ruta distinta; por eso el uso de memoria no depende del tamaño total del log, aunque sí de la cardinalidad de rutas. El tiempo transcurrido se informa siempre. Para medir el pico de memoria, activa `tracemalloc` explícitamente; su instrumentación añade sobrecarga, así que no uses ese modo para comparar tiempos de ejecución:
+
+```bash
+python3 big-log-reader/big_log_file_reader.py /var/log/nginx/access.log --measure-memory
+```
 
 En el script quedaron comentados el generador de archivos sintéticos y la variante que guarda todas las solicitudes en una lista. Son ejemplos de prueba para comparar el comportamiento y el consumo de memoria, no forman parte del flujo normal. La idea original y parte del proyecto están inspiradas en [Daily Python Projects](https://dailypythonprojects.substack.com/).
 

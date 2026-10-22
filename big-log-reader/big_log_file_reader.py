@@ -21,6 +21,7 @@ código como material de prueba y comparación.
 import argparse
 import re
 import tracemalloc
+from time import perf_counter
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -175,6 +176,11 @@ def main():
     parser.add_argument("--from", dest="start", type=parse_iso_datetime, help="inicio inclusivo ISO-8601")
     parser.add_argument("--to", dest="end", type=parse_iso_datetime, help="fin inclusivo ISO-8601")
     parser.add_argument("--route", help="filtrar por coincidencia exacta de ruta")
+    parser.add_argument(
+        "--measure-memory",
+        action="store_true",
+        help="activa tracemalloc para informar el pico de memoria (añade sobrecarga)",
+    )
     args = parser.parse_args()
 
     if args.start is not None and args.end is not None and args.start > args.end:
@@ -201,15 +207,21 @@ def main():
         parser.error(f"{path} no es un archivo existente")
 
     print(f"Reading {path} ({path.stat().st_size / 1e9:.2f} GB) with a generator...")
-    tracemalloc.start()                 # mide la memoria a partir de aquí (esto ralentiza Python)
+    if args.measure_memory:
+        tracemalloc.start()
+    started_at = perf_counter()
     report(
         read_requests(path, pattern, args.timestamp_format),
         start=args.start,
         end=args.end,
         route=args.route,
     )
-    peak = tracemalloc.get_traced_memory()[1]
-    print(f"  Peak memory:   {peak / 1e6:>11,.2f} MB")
+    elapsed = perf_counter() - started_at
+    print(f"  Elapsed time:  {elapsed:>11,.3f} s")
+    if args.measure_memory:
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        print(f"  Peak memory:   {peak / 1e6:>11,.2f} MB")
 
 
 def parse_iso_datetime(value):
