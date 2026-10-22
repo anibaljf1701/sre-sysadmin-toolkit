@@ -10,6 +10,7 @@ Herramientas independientes para automatizar tareas habituales de operación en 
 | Backup selectivo de RDS | Exporta tablas MySQL críticas a un archivo comprimido y purga copias locales con más de siete días | Bash, AWS Secrets Manager y Ansible |
 | Programación de instancias EC2 | Detiene instancias fuera del horario configurado y las inicia al comienzo de la jornada | AWS Lambda, con selección por tags o DynamoDB |
 | Monitoring de instancias EC2 | Recopila métricas de sistema y ofrece dashboards y alertas por email | Prometheus, Grafana, Docker Compose y Ansible |
+| Análisis de logs grandes | Resume solicitudes, errores 5xx, respuestas 404 y páginas más visitadas leyendo línea por línea | Python, solo biblioteca estándar |
 
 ## Requisitos comunes
 
@@ -23,6 +24,22 @@ Clona el repositorio:
 git clone https://github.com/anibaljf1701/sre-sysadmin-toolkit.git
 cd sre-sysadmin-toolkit
 ```
+
+## Análisis de logs grandes
+
+Script: `big-log-reader/big_log_file_reader.py`
+
+Analiza logs de acceso grandes con un generador: lee y procesa una línea por vez, sin cargar el archivo completo en memoria. Informa el total de solicitudes, errores HTTP 5xx, respuestas 404, las tres rutas más solicitadas y la ruta con más errores. No requiere instalar dependencias externas ni importar paquetes de terceros; usa exclusivamente la biblioteca estándar de Python.
+
+Ejecuta el script indicando un archivo de log existente:
+
+```bash
+python3 big-log-reader/big_log_file_reader.py /var/log/nginx/access.log
+```
+
+El parser espera líneas compatibles con el formato de access log de Apache que incluye la solicitud y el estado HTTP entre los campos habituales. El archivo se recorre en streaming, pero los contadores conservan una entrada por cada ruta distinta; por eso el uso de memoria no depende del tamaño total del log, aunque sí de la cardinalidad de rutas. La medición de memoria usa `tracemalloc` y añade algo de sobrecarga durante el análisis.
+
+En el script quedaron comentados el generador de archivos sintéticos y la variante que guarda todas las solicitudes en una lista. Son ejemplos de prueba para comparar el comportamiento y el consumo de memoria, no forman parte del flujo normal. La idea original y parte del proyecto están inspiradas en [Daily Python Projects](https://dailypythonprojects.substack.com/).
 
 ## Rotación de logs en S3
 
@@ -348,6 +365,8 @@ Los puertos publicados por Compose escuchan en todas las interfaces por defecto.
 sre-sysadmin-toolkit/
 ├── README.md
 ├── .gitignore
+├── big-log-reader/
+│   └── big_log_file_reader.py
 ├── ec2_scheduler/
 │   ├── requirements.txt
 │   ├── setup.sh
