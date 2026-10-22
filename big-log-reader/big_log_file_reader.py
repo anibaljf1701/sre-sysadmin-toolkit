@@ -58,15 +58,29 @@ from pathlib import Path
 
 
 def parse(line):
-    """Extrae la página y el código de estado de una línea del registro."""
+    """Extrae página y estado, o devuelve None si la línea no es válida."""
     parts = line.split('"')             # la solicitud y el navegador están entre comillas
-    page = parts[1].split()[1]          # "GET /about HTTP/1.1" -> /about
-    status = parts[2].split()[0]        # ' 200 5123 ' -> 200
+    if len(parts) < 3:
+        return None
+
+    request = parts[1].split()
+    status_fields = parts[2].split()
+    if len(request) != 3 or not request[0] or not request[1] or not request[2].startswith("HTTP/"):
+        return None
+    if not status_fields or not status_fields[0].isdigit() or len(status_fields[0]) != 3:
+        return None
+
+    status_code = int(status_fields[0])
+    if not 100 <= status_code <= 599:
+        return None
+
+    page = request[1]
+    status = status_fields[0]
     return page, status
 
 
 def read_requests(path):
-    """Generador que entrega una solicitud a la vez."""
+    """Generador de solicitudes; entrega None para líneas malformadas."""
     with open(path) as f:
         for line in f:                  # lee el archivo una línea a la vez
             yield parse(line)
@@ -83,10 +97,14 @@ def read_requests(path):
 
 
 def report(requests):
-    """Funciona con una lista o un generador: solo necesita un bucle for."""
-    total, not_found = 0, 0
+    """Resume solicitudes válidas e informa cuántas líneas se descartaron."""
+    total, not_found, malformed = 0, 0, 0
     pages, errors = Counter(), Counter()
-    for page, status in requests:
+    for request in requests:
+        if request is None:
+            malformed += 1
+            continue
+        page, status = request
         total += 1
         pages[page] += 1
         if status.startswith("5"):
@@ -94,6 +112,7 @@ def report(requests):
         elif status == "404":
             not_found += 1
     print(f"  Requests:      {total:>11,}")
+    print(f"  Malformed lines:{malformed:>10,}   (skipped)")
     print(f"  Server errors: {sum(errors.values()):>11,}   (status 5xx)")
     print(f"  Not found:     {not_found:>11,}   (status 404)")
     print("  Busiest pages:")

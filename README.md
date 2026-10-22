@@ -29,7 +29,7 @@ cd sre-sysadmin-toolkit
 
 Script: `big-log-reader/big_log_file_reader.py`
 
-Analiza logs de acceso grandes con un generador: lee y procesa una línea por vez, sin cargar el archivo completo en memoria. Informa el total de solicitudes, errores HTTP 5xx, respuestas 404, las tres rutas más solicitadas y la ruta con más errores. No requiere instalar dependencias externas ni importar paquetes de terceros; usa exclusivamente la biblioteca estándar de Python.
+Analiza logs de acceso grandes con un generador: lee y procesa una línea por vez, sin cargar el archivo completo en memoria. Informa el total de solicitudes válidas, líneas malformadas omitidas, errores HTTP 5xx, respuestas 404, las tres rutas más solicitadas y la ruta con más errores. Una línea inválida no detiene el análisis. No requiere instalar dependencias externas ni importar paquetes de terceros; usa exclusivamente la biblioteca estándar de Python.
 
 Ejecuta el script indicando un archivo de log existente:
 
