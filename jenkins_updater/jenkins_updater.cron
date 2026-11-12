@@ -1,9 +1,11 @@
-# Cargar variables de entorno desde /etc/default/jenkins-updater
+# Configurar estas rutas al instalar este archivo en /etc/cron.d.
+JENKINS_UPDATER_ENV=/etc/default/jenkins-updater
+JENKINS_UPDATER_DIR=/opt/sre-toolkit/jenkins_updater
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # 01:00 AM - Descubrimiento de actualizaciones y envío de reporte (solo si hay cambios)
-0 1 * * * root set -a; source /etc/default/jenkins-updater; set +a; /usr/bin/python3 /opt/sre-toolkit/jenkins_updater/jenkins_update_checker.py >> /var/log/jenkins-updater.log 2>&1
+0 1 * * * root set -a; source "${JENKINS_UPDATER_ENV:?JENKINS_UPDATER_ENV is required}"; set +a; /usr/bin/python3 "${JENKINS_UPDATER_DIR:?JENKINS_UPDATER_DIR is required}/jenkins_update_checker.py" >> /var/log/jenkins-updater.log 2>&1
 
 # 12:30 PM - Aplicación de parches aprobados (aborta si no se pasa --manifest o si está vacío)
-30 12 * * * root set -a; source /etc/default/jenkins-updater; set +a; /usr/bin/python3 /opt/sre-toolkit/jenkins_updater/jenkins_patch_applier.py --manifest "${MANIFEST_PATH:?MANIFEST_PATH is required}" >> /var/log/jenkins-updater.log 2>&1
+30 12 * * * root set -a; source "${JENKINS_UPDATER_ENV:?JENKINS_UPDATER_ENV is required}"; set +a; /usr/bin/python3 "${JENKINS_UPDATER_DIR:?JENKINS_UPDATER_DIR is required}/jenkins_patch_applier.py" --manifest "${MANIFEST_PATH:?MANIFEST_PATH is required}" >> /var/log/jenkins-updater.log 2>&1

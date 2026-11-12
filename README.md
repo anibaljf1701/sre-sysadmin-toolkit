@@ -11,6 +11,7 @@ Herramientas independientes para automatizar tareas habituales de operación en 
 | Programación de instancias EC2 | Detiene instancias fuera del horario configurado y las inicia al comienzo de la jornada | AWS Lambda, con selección por tags o DynamoDB |
 | Monitoring de instancias EC2 | Recopila métricas de sistema y ofrece dashboards y alertas por email | Prometheus, Grafana, Docker Compose y Ansible |
 | Análisis de logs grandes | Resume solicitudes, errores 5xx, respuestas 404 y páginas más visitadas leyendo línea por línea | Python, solo biblioteca estándar |
+| Actualizador de Jenkins | Detecta actualizaciones de sistema, Core y plugins; genera un reporte para aprobación humana y aplica las aprobadas | Python, systemd, AWS CLI y snapshots EBS |
 
 ## Requisitos comunes
 
@@ -375,6 +376,44 @@ Grafana queda disponible en `http://localhost:3000` (o el puerto definido en `GR
 
 Los puertos publicados por Compose escuchan en todas las interfaces por defecto. Limita el acceso a Grafana y Prometheus mediante firewall o security groups; si solo deben ser accesibles localmente, enlázalos a `127.0.0.1` o ponlos detrás de un proxy autenticado.
 
+## Actualizador de Jenkins
+
+La herramienta `jenkins_updater/` está diseñada para Jenkins instalado como servicio Linux en una instancia EC2 (systemd), con Jenkins Core administrado por el gestor de paquetes y plugins instalados en Jenkins. No administra Jenkins en contenedores; ese caso requiere otro flujo.
+
+El checker corre diariamente a la 01:00, consulta actualizaciones del sistema/Core y plugins, escribe un manifiesto de candidatas y envía el reporte por email únicamente si encuentra cambios. El SRE debe editar el manifiesto y aprobar explícitamente Core (`approved_core_update: true`) y/o agregar nombres a `approved_os_packages` y `approved_plugins`. Los campos aprobados se generan vacíos; si nadie los modifica, el aplicador no ejecuta actualizaciones. El aplicador corre a las 12:30, crea un snapshot EBS, aplica las selecciones, reinicia Jenkins y ejecuta el healthcheck configurado en el script.
+
+### Requisitos y permisos
+
+- Instancia EC2 Linux con systemd, Python 3.10 o superior, AWS CLI, Java y el CLI de Jenkins configurado.
+- Acceso de red desde la instancia a Jenkins Update Center y al servidor SMTP.
+- El usuario que ejecuta cron necesita permisos para actualizar paquetes, administrar el servicio, leer el journal y acceder a las rutas de configuración y logs.
+- El rol de instancia necesita describir instancias y volúmenes, crear y etiquetar snapshots y, para el flujo automatizado de rollback de un volumen de datos dedicado, crear, adjuntar y separar volúmenes EBS. Limita estos permisos a la instancia y volúmenes que correspondan.
+- Configura las credenciales de Jenkins y SMTP en un archivo local protegido; no guardes credenciales reales en Git.
+
+### Instalación y configuración
+
+Copia `jenkins_updater/` al host Jenkins, por ejemplo a `/opt/sre-toolkit/jenkins_updater/`. Copia el ejemplo de entorno a una ruta local, completa los valores y protege el archivo:
+
+```bash
+sudo install -d -m 0750 /opt/sre-toolkit/jenkins_updater
+sudo install -m 0640 jenkins_updater/jenkins_update_checker.py /opt/sre-toolkit/jenkins_updater/
+sudo install -m 0640 jenkins_updater/jenkins_patch_applier.py /opt/sre-toolkit/jenkins_updater/
+sudo install -m 0600 jenkins_updater/jenkins_updater.env.example /etc/default/jenkins-updater
+sudo install -m 0644 jenkins_updater/jenkins_updater.cron /etc/cron.d/jenkins-updater
+```
+
+En `/etc/cron.d/jenkins-updater`, ajusta las variables `JENKINS_UPDATER_ENV` y `JENKINS_UPDATER_DIR` si instalaste el archivo de entorno o los scripts en otras ubicaciones. Ambas tareas usan esas variables para encontrar sus archivos. La variable `MANIFEST_PATH` se configura en el archivo de entorno y la consume el checker y el aplicador. Cron interpreta los horarios en la zona horaria del host.
+
+Completa las variables de `jenkins_updater/jenkins_updater.env.example` en el archivo instalado. En particular, configura `JENKINS_URL`, `JENKINS_USER`, `JENKINS_API_TOKEN`, `JENKINS_CLI_JAR`, `MANIFEST_PATH`, `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD` y el destinatario. Asegúrate de que el usuario de cron pueda leerlo y que no sea legible por usuarios no autorizados.
+
+### Aprobación y límites de recuperación
+
+El reporte por correo muestra las versiones destino detectadas para Core y paquetes del sistema; para plugins indica la versión instalada y que hay una actualización disponible, pero todavía no la versión candidata. Antes de las 12:30, revisa y edita el manifiesto en `MANIFEST_PATH`; deja solo los nombres aprobados en las listas `approved_*` y activa Core únicamente si se aprueba. Si no se encuentran actualizaciones, el checker elimina el manifiesto anterior para que no se reutilicen aprobaciones vencidas.
+
+El snapshot actual cubre el volumen EBS indicado por `JENKINS_EBS_DEVICE`. En un volumen de datos dedicado, el código intenta reemplazarlo automáticamente desde el snapshot; en el volumen root solo detiene Jenkins y reporta el snapshot para restauración manual. Este mecanismo no restaura automáticamente el volumen root donde se actualizan paquetes del sistema o Jenkins Core. Valida el diseño de volúmenes y el procedimiento de recuperación antes de habilitar actualizaciones en producción.
+
+Las aprobaciones identifican paquetes y plugins por nombre; no fijan todavía la versión objetivo que se revisó en el reporte. El gestor de paquetes o Update Center podría ofrecer otra versión al aplicar. Considera esto una limitación operativa hasta que el manifiesto y el aplicador incorporen validación de versiones.
+
 ## Estructura del repositorio
 
 ```
@@ -403,6 +442,11 @@ sre-sysadmin-toolkit/
 │   ├── ansible/
 │   ├── grafana/
 │   └── prometheus/
+├── jenkins_updater/
+│   ├── jenkins_patch_applier.py
+│   ├── jenkins_update_checker.py
+│   ├── jenkins_updater.cron
+│   └── jenkins_updater.env.example
 └── mysql_table_backup/
    ├── bd_table_backup.sh
    └── setup_bd_backup.yml
