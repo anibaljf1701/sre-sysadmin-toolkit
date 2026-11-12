@@ -147,6 +147,7 @@ def main() -> None:
 
     # Regla estricta: Si no hay actualizaciones, no generar reporte ni manifiesto
     if not (has_core or has_os or has_plugins):
+        manifest_path.unlink(missing_ok=True)
         print("[INFO] Sin actualizaciones pendientes de sistema o plugins. Finalizando sin reporte.")
         sys.exit(0)
 
@@ -156,10 +157,18 @@ def main() -> None:
     manifest_payload = {
         "generated_at_utc": timestamp,
         "jenkins_url": jenkins_url,
-        "instructions": "Elimine de este archivo los paquetes o plugins que NO aprueba para la ventana de las 12:30. Si vacia o borra el archivo, no se aplicara nada.",
-        "approved_core_update": sys_updates["core"],
-        "approved_os_packages": [p["package"] for p in sys_updates["os_packages"]],
-        "approved_plugins": [p["name"] for p in plugin_updates],
+        "instructions": (
+            "Las actualizaciones detectadas son candidatas, no aprobaciones. "
+            "Para aprobar Core, cambie approved_core_update a true. "
+            "Agregue unicamente los nombres autorizados a approved_os_packages "
+            "y approved_plugins. Sin cambios explicitos, no se aplicara nada."
+        ),
+        "available_core_update": sys_updates["core"],
+        "available_os_packages": sys_updates["os_packages"],
+        "available_plugins": plugin_updates,
+        "approved_core_update": False,
+        "approved_os_packages": [],
+        "approved_plugins": [],
     }
 
     manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
@@ -172,8 +181,9 @@ def main() -> None:
         f"Manifiesto generado en: {manifest_path}",
         "",
         "ACCIÓN REQUERIDA ANTES DE LAS 12:30:",
-        f"Edite '{manifest_path}' dejando únicamente los elementos aprobados.",
-        "Si el archivo se elimina o queda sin elementos aprobados, la ejecución de las 12:30 abortará automáticamente.",
+        f"Edite '{manifest_path}' para aprobar explicitamente solo las actualizaciones elegidas.",
+        "Cambie approved_core_update a true para Core y agregue nombres a approved_os_packages o approved_plugins.",
+        "Las listas aprobadas quedan vacias por defecto; si no se editan, la ejecucion de las 12:30 abortara.",
         "",
         "1. JENKINS CORE:",
         f"   - {sys_updates['core']['package']} -> {sys_updates['core']['target_version']}" if has_core else "   - Sin cambios pendientes",
