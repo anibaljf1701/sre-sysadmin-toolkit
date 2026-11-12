@@ -6,4 +6,4 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 1 * * * root set -a; source /etc/default/jenkins-updater; set +a; /usr/bin/python3 /opt/sre-toolkit/jenkins_updater/jenkins_update_checker.py >> /var/log/jenkins-updater.log 2>&1
 
 # 12:30 PM - Aplicación de parches aprobados (aborta si no se pasa --manifest o si está vacío)
-30 12 * * * root set -a; source /etc/default/jenkins-updater; set +a; /usr/bin/python3 /opt/sre-toolkit/jenkins_updater/jenkins_patch_applier.py --manifest /var/lib/jenkins-updater/pending_updates.json >> /var/log/jenkins-updater.log 2>&1
+30 12 * * * root set -a; source /etc/default/jenkins-updater; set +a; /usr/bin/python3 /opt/sre-toolkit/jenkins_updater/jenkins_patch_applier.py --manifest "${MANIFEST_PATH:?MANIFEST_PATH is required}" >> /var/log/jenkins-updater.log 2>&1
