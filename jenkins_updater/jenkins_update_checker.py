@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Jenkins Patch Applier & Automated Rollback (EC2 / Systemd environments)
-Validates human-approved manifest, creates an AWS EBS snapshot before patching,
-applies OS/Core/Plugin updates, runs a 3-condition healthcheck (180s timeout),
-and executes disk-level rollback if Jenkins fails to recover.
-Uses 100% Python Standard Library + AWS CLI / Instance Profile.
+Jenkins Update Checker (EC2 / Systemd environments)
+Discovers OS/Jenkins Core and Plugin updates, writes an approval manifest,
+and notifies the SRE team via email only when updates are available.
+Uses 100% Python Standard Library.
 """
 
-import argparse
 import base64
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -18,7 +16,6 @@ import shutil
 import smtplib
 import subprocess
 import sys
-import time
 import urllib.error
 import urllib.request
 
@@ -31,7 +28,90 @@ def get_env(key: str, default: str | None = None, required: bool = False) -> str
     return val or ""
 
 
-def send_alert_email(subject: str, body: str) -> None:
+def jenkins_api_get(endpoint: str, base_url: str, user: str, token: str) -> dict:
+    url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    auth_str = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode("ascii")
+    req = urllib.request.Request(url, headers={"Authorization": f"Basic {auth_str}"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def check_system_updates() -> dict:
+    """Detecta actualizaciones de paquetes del SO y de Jenkins Core (apt o dnf/yum)."""
+    core_update = None
+    os_packages = []
+
+    if shutil.which("apt-get"):
+        subprocess.run(["apt-get", "update", "-qq"], check=False)
+        res = subprocess.run(
+            ["apt", "list", "--upgradable"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for line in res.stdout.splitlines():
+            if "/" not in line or line.startswith("Listing"):
+                continue
+            pkg_name = line.split("/")[0].strip()
+            version_info = line.split()[1] if len(line.split()) > 1 else "unknown"
+            if pkg_name == "jenkins":
+                core_update = {"package": "jenkins", "target_version": version_info}
+            else:
+                os_packages.append({"package": pkg_name, "target_version": version_info})
+
+    elif shutil.which("dnf") or shutil.which("yum"):
+        pkg_mgr = "dnf" if shutil.which("dnf") else "yum"
+        res = subprocess.run(
+            [pkg_mgr, "check-update", "-q"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # Código 100 indica actualizaciones disponibles en dnf/yum
+        if res.returncode == 100:
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    pkg_name = parts[0].split(".")[0]
+                    version_info = parts[1]
+                    if pkg_name == "jenkins":
+                        core_update = {"package": "jenkins", "target_version": version_info}
+                    else:
+                        os_packages.append({"package": pkg_name, "target_version": version_info})
+
+    return {"core": core_update, "os_packages": os_packages}
+
+
+def check_plugin_updates(base_url: str, user: str, token: str) -> list[dict]:
+    """Consulta la API de Jenkins para listar plugins instalados con actualizaciones pendientes."""
+    # Trigger refresh silencioso del Update Center
+    try:
+        auth_str = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode("ascii")
+        req = urllib.request.Request(
+            f"{base_url.rstrip('/')}/pluginManager/checkUpdatesServer",
+            method="POST",
+            headers={"Authorization": f"Basic {auth_str}"},
+        )
+        urllib.request.urlopen(req, timeout=30)
+    except Exception:
+        pass
+
+    plugins_data = jenkins_api_get("pluginManager/api/json?depth=1", base_url, user, token)
+    updates_available = []
+
+    for plugin in plugins_data.get("plugins", []):
+        if plugin.get("hasUpdate"):
+            updates_available.append({
+                "name": plugin.get("shortName"),
+                "display_name": plugin.get("longName"),
+                "current_version": plugin.get("version"),
+                "enabled": plugin.get("enabled", True),
+            })
+
+    return sorted(updates_available, key=lambda x: x["name"])
+
+
+def send_email_report(subject: str, body: str) -> None:
     domain = get_env("COMPANY_DOMAIN", "example.com")
     recipient = get_env("ALERT_RECIPIENT", f"sre-team@{domain}")
     smtp_host = get_env("SMTP_HOST", required=True)
@@ -52,344 +132,74 @@ def send_alert_email(subject: str, body: str) -> None:
         server.send_message(msg)
 
 
-def validate_manifest(manifest_path: Path) -> dict:
-    """Aborta si el archivo no existe, está vacío o no contiene aprobaciones."""
-    if not manifest_path.exists() or not manifest_path.is_file():
-        print(f"[ABORT] Manifiesto no encontrado en '{manifest_path}'. Nada que ejecutar.")
-        sys.exit(0)
-
-    if manifest_path.stat().st_size == 0:
-        print(f"[ABORT] Manifiesto '{manifest_path}' está vacío. Nada que ejecutar.")
-        sys.exit(0)
-
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        print(f"[ABORT] Manifiesto inválido (JSON corrupto): {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    has_core = bool(data.get("approved_core_update"))
-    has_os = len(data.get("approved_os_packages") or []) > 0
-    has_plugins = len(data.get("approved_plugins") or []) > 0
-
-    if not (has_core or has_os or has_plugins):
-        print("[ABORT] El manifiesto no contiene paquetes ni plugins aprobados. Abortando ejecución.")
-        sys.exit(0)
-
-    return data
-
-
-def get_ec2_metadata() -> dict:
-    """Obtiene Instance ID, Region y Availability Zone usando IMDSv2."""
-    token_req = urllib.request.Request(
-        "http://169.254.169.254/latest/api/token",
-        method="PUT",
-        headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
-    )
-    with urllib.request.urlopen(token_req, timeout=5) as resp:
-        token = resp.read().decode("utf-8")
-
-    headers = {"X-aws-ec2-metadata-token": token}
-
-    def fetch(path: str) -> str:
-        req = urllib.request.Request(f"http://169.254.169.254/latest/meta-data/{path}", headers=headers)
-        with urllib.request.urlopen(req, timeout=5) as r:
-            return r.read().decode("utf-8")
-
-    return {
-        "instance_id": fetch("instance-id"),
-        "region": fetch("placement/region"),
-        "az": fetch("placement/availability-zone"),
-    }
-
-
-def create_ebs_snapshot(ec2_meta: dict, device_name: str) -> dict:
-    """Crea un Snapshot EBS del volumen de Jenkins y espera hasta que esté completo."""
-    region = ec2_meta["region"]
-    instance_id = ec2_meta["instance_id"]
-
-    desc_cmd = [
-        "aws", "ec2", "describe-instances",
-        "--region", region,
-        "--instance-ids", instance_id,
-        "--query", f"Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='{device_name}'].Ebs.VolumeId",
-        "--output", "text",
-    ]
-    vol_res = subprocess.run(desc_cmd, capture_output=True, text=True, check=True)
-    volume_id = vol_res.stdout.strip()
-
-    if not volume_id or volume_id == "None":
-        raise RuntimeError(f"No se encontró volumen EBS asociado al dispositivo {device_name} en {instance_id}")
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    snap_cmd = [
-        "aws", "ec2", "create-snapshot",
-        "--region", region,
-        "--volume-id", volume_id,
-        "--description", f"Pre-patch Jenkins backup {instance_id} ({ts})",
-        "--tag-specifications",
-        f"ResourceType=snapshot,Tags=[{{Key=Name,Value=jenkins-prepatch-{ts}}},{{Key=ManagedBy,Value=jenkins-patch-applier}}]",
-        "--query", "SnapshotId",
-        "--output", "text",
-    ]
-    snap_res = subprocess.run(snap_cmd, capture_output=True, text=True, check=True)
-    snapshot_id = snap_res.stdout.strip()
-
-    print(f"[INFO] Esperando finalización del EBS Snapshot {snapshot_id} (Volumen: {volume_id})...")
-    subprocess.run(
-        ["aws", "ec2", "wait", "snapshot-completed", "--region", region, "--snapshot-ids", snapshot_id],
-        check=True,
-    )
-    print(f"[OK] Snapshot {snapshot_id} completado.")
-    return {"volume_id": volume_id, "snapshot_id": snapshot_id}
-
-
-def set_quiet_down(base_url: str, user: str, token: str, enable: bool) -> None:
-    endpoint = "quietDown" if enable else "cancelQuietDown"
-    url = f"{base_url.rstrip('/')}/{endpoint}"
-    auth_str = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode("ascii")
-    req = urllib.request.Request(url, method="POST", headers={"Authorization": f"Basic {auth_str}"})
-    try:
-        urllib.request.urlopen(req, timeout=15)
-    except Exception as exc:
-        print(f"[WARN] No se pudo cambiar estado {endpoint}: {exc}")
-
-
-def apply_updates(approved: dict, base_url: str, user: str, token: str, cli_jar: str, service_name: str) -> None:
-    set_quiet_down(base_url, user, token, enable=True)
-
-    # 1. Paquetes de Sistema y Jenkins Core
-    packages_to_upgrade = list(approved.get("approved_os_packages") or [])
-    if approved.get("approved_core_update"):
-        packages_to_upgrade.append("jenkins")
-
-    if packages_to_upgrade:
-        print(f"[INFO] Actualizando paquetes del sistema/core: {', '.join(packages_to_upgrade)}")
-        if shutil.which("apt-get"):
-            env = os.environ.copy()
-            env["DEBIAN_FRONTEND"] = "noninteractive"
-            subprocess.run(
-                ["apt-get", "install", "-y", "--only-upgrade", *packages_to_upgrade],
-                env=env,
-                check=True,
-            )
-        elif shutil.which("dnf") or shutil.which("yum"):
-            pkg_mgr = "dnf" if shutil.which("dnf") else "yum"
-            subprocess.run([pkg_mgr, "update", "-y", *packages_to_upgrade], check=True)
-
-    # 2. Plugins de Jenkins vía CLI
-    plugins = approved.get("approved_plugins") or []
-    if plugins:
-        print(f"[INFO] Actualizando plugins de Jenkins: {', '.join(plugins)}")
-        subprocess.run(
-            [
-                "java", "-jar", cli_jar,
-                "-s", base_url,
-                "-auth", f"{user}:{token}",
-                "install-plugin", *plugins,
-            ],
-            check=True,
-        )
-
-    # 3. Reinicio limpio del servicio
-    print(f"[INFO] Reiniciando servicio '{service_name}'...")
-    subprocess.run(["systemctl", "restart", service_name], check=True)
-
-
-def run_healthcheck(base_url: str, user: str, token: str, service_name: str, patch_start_iso: str, timeout_sec: int = 180) -> tuple[bool, str]:
-    """
-    Valida 3 condiciones dentro de una ventana de 180 segundos:
-    1. HTTP 200 en /login
-    2. API /api/json responde JSON válido con quietingDown == False
-    3. Sin errores fatales de carga de plugins en journalctl
-    """
-    deadline = time.time() + timeout_sec
-    auth_str = base64.b64encode(f"{user}:{token}".encode("utf-8")).decode("ascii")
-    last_error = "Timeout esperando respuesta de Jenkins"
-
-    while time.time() < deadline:
-        try:
-            # Condición 1: HTTP 200 en /login
-            login_req = urllib.request.Request(f"{base_url.rstrip('/')}/login")
-            with urllib.request.urlopen(login_req, timeout=10) as login_resp:
-                if login_resp.status != 200:
-                    last_error = f"/login devolvió HTTP {login_resp.status}"
-                    time.sleep(10)
-                    continue
-
-            # Condición 2: API /api/json válida y quietingDown == False
-            api_req = urllib.request.Request(
-                f"{base_url.rstrip('/')}/api/json",
-                headers={"Authorization": f"Basic {auth_str}"},
-            )
-            with urllib.request.urlopen(api_req, timeout=10) as api_resp:
-                payload = json.loads(api_resp.read().decode("utf-8"))
-                if payload.get("quietingDown") is True:
-                    set_quiet_down(base_url, user, token, enable=False)
-                    last_error = "Jenkins sigue en modo quietingDown"
-                    time.sleep(10)
-                    continue
-
-            # Condición 3: Ausencia de errores fatales de plugins en logs del servicio
-            journal_res = subprocess.run(
-                ["journalctl", "-u", service_name, "--since", patch_start_iso, "--no-pager"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            fatal_markers = ("Failed Loading plugin", "HudsonFailedToLoad", "SEVERE: Error injecting")
-            for marker in fatal_markers:
-                if marker in journal_res.stdout:
-                    return False, f"Error fatal detectado en logs de Jenkins: '{marker}'"
-
-            return True, "Todas las verificaciones de salud superadas (HTTP 200, API activa, 0 errores fatales)."
-
-        except Exception as exc:
-            last_error = str(exc)
-            time.sleep(10)
-
-    return False, f"Healthcheck falló tras {timeout_sec}s. Último error: {last_error}"
-
-
-def execute_rollback(ec2_meta: dict, ebs_info: dict, device_name: str, jenkins_home: str, service_name: str, is_dedicated_vol: bool) -> str:
-    """
-    Ejecuta rollback automático si JENKINS_HOME reside en un volumen EBS dedicado,
-    o detiene el servicio y retorna instrucciones exactas si es el volumen root.
-    """
-    region = ec2_meta["region"]
-    instance_id = ec2_meta["instance_id"]
-    az = ec2_meta["az"]
-    old_vol = ebs_info["volume_id"]
-    snap_id = ebs_info["snapshot_id"]
-
-    subprocess.run(["systemctl", "stop", service_name], check=False)
-
-    if not is_dedicated_vol:
-        return (
-            f"Servicio '{service_name}' detenido para evitar corrupción.\n"
-            f"El volumen {old_vol} es el volumen ROOT de {instance_id} y no puede desmontarse en caliente.\n"
-            f"Snapshot listo para restaurar: {snap_id} (Región: {region}, AZ: {az})."
-        )
-
-    # Rollback automatizado en caliente para volumen de datos dedicado
-    subprocess.run(["umount", "-l", jenkins_home], check=True)
-    subprocess.run(
-        ["aws", "ec2", "detach-volume", "--region", region, "--volume-id", old_vol],
-        check=True,
-    )
-    subprocess.run(
-        ["aws", "ec2", "wait", "volume-available", "--region", region, "--volume-ids", old_vol],
-        check=True,
-    )
-
-    new_vol_res = subprocess.run(
-        [
-            "aws", "ec2", "create-volume",
-            "--region", region,
-            "--availability-zone", az,
-            "--snapshot-id", snap_id,
-            "--volume-type", "gp3",
-            "--query", "VolumeId",
-            "--output", "text",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    new_vol_id = new_vol_res.stdout.strip()
-
-    subprocess.run(
-        ["aws", "ec2", "wait", "volume-available", "--region", region, "--volume-ids", new_vol_id],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "aws", "ec2", "attach-volume",
-            "--region", region,
-            "--volume-id", new_vol_id,
-            "--instance-id", instance_id,
-            "--device", device_name,
-        ],
-        check=True,
-    )
-    subprocess.run(
-        ["aws", "ec2", "wait", "volume-in-use", "--region", region, "--volume-ids", new_vol_id],
-        check=True,
-    )
-
-    subprocess.run(["mount", device_name, jenkins_home], check=True)
-    subprocess.run(["systemctl", "start", service_name], check=True)
-
-    return (
-        f"ROLLBACK DE DISCO COMPLETADO AUTOMÁTICAMENTE.\n"
-        f"- Volumen anterior desmontado: {old_vol}\n"
-        f"- Nuevo volumen restaurado desde Snapshot {snap_id}: {new_vol_id}\n"
-        f"- Servicio '{service_name}' reiniciado sobre {jenkins_home}."
-    )
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Aplica actualizaciones aprobadas de Jenkins sobre EC2 con EBS Snapshot y Rollback automático."
-    )
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        required=True,
-        help="Ruta obligatoria al archivo JSON de actualizaciones aprobadas.",
-    )
-    args = parser.parse_args()
-
-    # 1. Validación estricta antes de tocar la instancia o AWS
-    approved_data = validate_manifest(args.manifest)
-
     jenkins_url = get_env("JENKINS_URL", "http://localhost:8080")
     jenkins_user = get_env("JENKINS_USER", required=True)
     jenkins_token = get_env("JENKINS_API_TOKEN", required=True)
-    cli_jar = get_env("JENKINS_CLI_JAR", "/var/cache/jenkins/war/WEB-INF/lib/cli-2.462.jar")
-    service_name = get_env("JENKINS_SERVICE_NAME", "jenkins")
-    jenkins_home = get_env("JENKINS_HOME", "/var/lib/jenkins")
-    device_name = get_env("JENKINS_EBS_DEVICE", "/dev/xvdf")
-    is_dedicated = get_env("IS_DEDICATED_DATA_VOLUME", "true").lower() == "true"
+    manifest_path = Path(get_env("MANIFEST_PATH", "/var/lib/jenkins-updater/pending_updates.json"))
 
-    ec2_meta = get_ec2_metadata()
-    ebs_info = create_ebs_snapshot(ec2_meta, device_name)
+    sys_updates = check_system_updates()
+    plugin_updates = check_plugin_updates(jenkins_url, jenkins_user, jenkins_token)
 
-    patch_start_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    has_core = sys_updates["core"] is not None
+    has_os = len(sys_updates["os_packages"]) > 0
+    has_plugins = len(plugin_updates) > 0
 
-    try:
-        apply_updates(approved_data, jenkins_url, jenkins_user, jenkins_token, cli_jar, service_name)
-    except Exception as exc:
-        rollback_msg = execute_rollback(ec2_meta, ebs_info, device_name, jenkins_home, service_name, is_dedicated)
-        send_alert_email(
-            subject="[CRITICAL] Fallo durante parcheo de Jenkins - Rollback ejecutado",
-            body=f"Error aplicando actualizaciones: {exc}\n\n{rollback_msg}",
-        )
-        sys.exit(1)
+    # Regla estricta: Si no hay actualizaciones, no generar reporte ni manifiesto
+    if not (has_core or has_os or has_plugins):
+        print("[INFO] Sin actualizaciones pendientes de sistema o plugins. Finalizando sin reporte.")
+        sys.exit(0)
 
-    # 2. Healthcheck post-parcheo (ventana máxima de 3 minutos)
-    healthy, details = run_healthcheck(jenkins_url, jenkins_user, jenkins_token, service_name, patch_start_iso, timeout_sec=180)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    if healthy:
-        # Limpiamos el manifiesto para evitar reprocesamiento al día siguiente
-        args.manifest.unlink(missing_ok=True)
-        send_alert_email(
-            subject="[OK] Ventana de parcheo Jenkins completada exitosamente",
-            body=(
-                f"Las actualizaciones aprobadas fueron aplicadas y verificadas.\n"
-                f"Snapshot preventivo generado: {ebs_info['snapshot_id']}\n"
-                f"Resultado Healthcheck: {details}"
-            ),
-        )
-        print(f"[OK] {details}")
+    manifest_payload = {
+        "generated_at_utc": timestamp,
+        "jenkins_url": jenkins_url,
+        "instructions": "Elimine de este archivo los paquetes o plugins que NO aprueba para la ventana de las 12:30. Si vacia o borra el archivo, no se aplicara nada.",
+        "approved_core_update": sys_updates["core"],
+        "approved_os_packages": [p["package"] for p in sys_updates["os_packages"]],
+        "approved_plugins": [p["name"] for p in plugin_updates],
+    }
+
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
+
+    # Construcción del reporte detallado
+    lines = [
+        f"REPORTE DE ACTUALIZACIONES PENDIENTES DE JENKINS ({timestamp})",
+        "=" * 70,
+        f"Instancia: {jenkins_url}",
+        f"Manifiesto generado en: {manifest_path}",
+        "",
+        "ACCIÓN REQUERIDA ANTES DE LAS 12:30:",
+        f"Edite '{manifest_path}' dejando únicamente los elementos aprobados.",
+        "Si el archivo se elimina o queda sin elementos aprobados, la ejecución de las 12:30 abortará automáticamente.",
+        "",
+        "1. JENKINS CORE:",
+        f"   - {sys_updates['core']['package']} -> {sys_updates['core']['target_version']}" if has_core else "   - Sin cambios pendientes",
+        "",
+        f"2. PAQUETES DEL SISTEMA OPERATIVO ({len(sys_updates['os_packages'])}):",
+    ]
+
+    if has_os:
+        for pkg in sys_updates["os_packages"]:
+            lines.append(f"   - {pkg['package']} ({pkg['target_version']})")
     else:
-        rollback_msg = execute_rollback(ec2_meta, ebs_info, device_name, jenkins_home, service_name, is_dedicated)
-        send_alert_email(
-            subject="[CRITICAL] Healthcheck de Jenkins fallido - Rollback ejecutado",
-            body=f"Motivo del fallo: {details}\n\n{rollback_msg}",
-        )
-        print(f"[CRITICAL] {details}\n{rollback_msg}", file=sys.stderr)
-        sys.exit(1)
+        lines.append("   - Sin cambios pendientes")
+
+    lines.append("")
+    lines.append(f"3. PLUGINS DE JENKINS ({len(plugin_updates)}):")
+    if has_plugins:
+        for plg in plugin_updates:
+            lines.append(f"   - {plg['name']} (actual: {plg['current_version']}) - {plg['display_name']}")
+    else:
+        lines.append("   - Sin cambios pendientes")
+
+    report_text = "\n".join(lines)
+    subject = f"[SRE Action Required] Actualizaciones disponibles en Jenkins ({len(plugin_updates)} plugins, Core: {'Sí' if has_core else 'No'})"
+
+    send_email_report(subject, report_text)
+    print(f"[OK] Reporte enviado y manifiesto guardado en {manifest_path}")
 
 
 if __name__ == "__main__":
