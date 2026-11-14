@@ -387,7 +387,7 @@ El checker corre diariamente a la 01:00, consulta actualizaciones del sistema/Co
 - Instancia EC2 Linux con systemd, Python 3.10 o superior, AWS CLI, Java y el CLI de Jenkins configurado.
 - Acceso de red desde la instancia a Jenkins Update Center y al servidor SMTP.
 - El usuario que ejecuta cron necesita permisos para actualizar paquetes, administrar el servicio, leer el journal y acceder a las rutas de configuración y logs.
-- El rol de instancia necesita describir instancias y volúmenes, crear y etiquetar snapshots y, para el flujo automatizado de rollback de un volumen de datos dedicado, crear, adjuntar y separar volúmenes EBS. Limita estos permisos a la instancia y volúmenes que correspondan.
+- El rol de instancia necesita describir instancias y volúmenes, crear y etiquetar snapshots, y permitir `ec2:CreateReplaceRootVolumeTask` para restaurar el volumen root. Si `JENKINS_HOME` usa un volumen de datos dedicado, también necesita crear, adjuntar y separar volúmenes EBS. Limita estos permisos a la instancia, snapshots y volúmenes que correspondan.
 - Configura las credenciales de Jenkins y SMTP en un archivo local protegido; no guardes credenciales reales en Git.
 
 ### Instalación y configuración
@@ -410,7 +410,7 @@ Completa las variables de `jenkins_updater/jenkins_updater.env.example` en el ar
 
 El reporte por correo muestra las versiones destino detectadas para Core y paquetes del sistema; para plugins indica la versión instalada y que hay una actualización disponible, pero todavía no la versión candidata. Antes de las 12:30, revisa y edita el manifiesto en `MANIFEST_PATH`; deja solo los nombres aprobados en las listas `approved_*` y activa Core únicamente si se aprueba. Si no se encuentran actualizaciones, el checker elimina el manifiesto anterior para que no se reutilicen aprobaciones vencidas.
 
-El snapshot actual cubre el volumen EBS indicado por `JENKINS_EBS_DEVICE`. En un volumen de datos dedicado, el código intenta reemplazarlo automáticamente desde el snapshot; en el volumen root solo detiene Jenkins y reporta el snapshot para restauración manual. Este mecanismo no restaura automáticamente el volumen root donde se actualizan paquetes del sistema o Jenkins Core. Valida el diseño de volúmenes y el procedimiento de recuperación antes de habilitar actualizaciones en producción.
+Antes de aplicar cambios, el aplicador crea y espera snapshots del volumen root y del volumen indicado por `JENKINS_EBS_DEVICE` si `JENKINS_HOME` está dedicado. Si falla el parcheo o el healthcheck, restaura primero el volumen de datos dedicado y solicita a EC2 reemplazar el volumen root desde su snapshot. EC2 reinicia automáticamente la instancia; conserva el volumen root reemplazado y el aviso incluye el ID de la tarea de reemplazo. Para que EC2 acepte la operación, la instancia debe estar en ejecución y usar un volumen EBS como root. Configura `IS_DEDICATED_DATA_VOLUME` y `JENKINS_EBS_DEVICE` según el mapeo real de discos, y valida permisos, diseño de volúmenes y procedimiento de recuperación antes de habilitar actualizaciones en producción.
 
 Las aprobaciones identifican paquetes y plugins por nombre; no fijan todavía la versión objetivo que se revisó en el reporte. El gestor de paquetes o Update Center podría ofrecer otra versión al aplicar. Considera esto una limitación operativa hasta que el manifiesto y el aplicador incorporen validación de versiones.
 

@@ -103,8 +103,8 @@ def get_ec2_metadata() -> dict:
     }
 
 
-def create_ebs_snapshot(ec2_meta: dict, device_name: str) -> dict:
-    """Crea un Snapshot EBS del volumen de Jenkins y espera hasta que esté completo."""
+def create_ebs_snapshot(ec2_meta: dict, device_name: str, is_dedicated_vol: bool) -> dict:
+    """Crea snapshots del volumen root y del volumen donde reside JENKINS_HOME."""
     region = ec2_meta["region"]
     instance_id = ec2_meta["instance_id"]
 
@@ -112,36 +112,55 @@ def create_ebs_snapshot(ec2_meta: dict, device_name: str) -> dict:
         "aws", "ec2", "describe-instances",
         "--region", region,
         "--instance-ids", instance_id,
-        "--query", f"Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='{device_name}'].Ebs.VolumeId",
-        "--output", "text",
+        "--query", "Reservations[0].Instances[0]",
+        "--output", "json",
     ]
-    vol_res = subprocess.run(desc_cmd, capture_output=True, text=True, check=True)
-    volume_id = vol_res.stdout.strip()
+    instance = json.loads(subprocess.run(desc_cmd, capture_output=True, text=True, check=True).stdout)
+    root_device = instance["RootDeviceName"]
+    block_devices = {
+        mapping["DeviceName"]: mapping.get("Ebs", {}).get("VolumeId")
+        for mapping in instance["BlockDeviceMappings"]
+    }
+    root_volume_id = block_devices.get(root_device)
+    jenkins_volume_id = block_devices.get(device_name)
 
-    if not volume_id or volume_id == "None":
+    if not root_volume_id:
+        raise RuntimeError(f"No se encontró el volumen EBS root asociado a {root_device} en {instance_id}")
+    if not jenkins_volume_id:
         raise RuntimeError(f"No se encontró volumen EBS asociado al dispositivo {device_name} en {instance_id}")
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    snap_cmd = [
-        "aws", "ec2", "create-snapshot",
-        "--region", region,
-        "--volume-id", volume_id,
-        "--description", f"Pre-patch Jenkins backup {instance_id} ({ts})",
-        "--tag-specifications",
-        f"ResourceType=snapshot,Tags=[{{Key=Name,Value=jenkins-prepatch-{ts}}},{{Key=ManagedBy,Value=jenkins-patch-applier}}]",
-        "--query", "SnapshotId",
-        "--output", "text",
-    ]
-    snap_res = subprocess.run(snap_cmd, capture_output=True, text=True, check=True)
-    snapshot_id = snap_res.stdout.strip()
+    jenkins_is_root = jenkins_volume_id == root_volume_id
+    if jenkins_is_root == is_dedicated_vol:
+        raise RuntimeError(
+            f"IS_DEDICATED_DATA_VOLUME={str(is_dedicated_vol).lower()} no coincide con el volumen "
+            f"configurado para JENKINS_HOME ({device_name})"
+        )
 
-    print(f"[INFO] Esperando finalización del EBS Snapshot {snapshot_id} (Volumen: {volume_id})...")
-    subprocess.run(
-        ["aws", "ec2", "wait", "snapshot-completed", "--region", region, "--snapshot-ids", snapshot_id],
-        check=True,
-    )
-    print(f"[OK] Snapshot {snapshot_id} completado.")
-    return {"volume_id": volume_id, "snapshot_id": snapshot_id}
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+    def snapshot_volume(volume_id: str, purpose: str) -> dict:
+        snap_cmd = [
+            "aws", "ec2", "create-snapshot",
+            "--region", region,
+            "--volume-id", volume_id,
+            "--description", f"Pre-patch Jenkins {purpose} backup {instance_id} ({ts})",
+            "--tag-specifications",
+            f"ResourceType=snapshot,Tags=[{{Key=Name,Value=jenkins-prepatch-{purpose}-{ts}}},{{Key=ManagedBy,Value=jenkins-patch-applier}}]",
+            "--query", "SnapshotId",
+            "--output", "text",
+        ]
+        snapshot_id = subprocess.run(snap_cmd, capture_output=True, text=True, check=True).stdout.strip()
+        print(f"[INFO] Esperando snapshot {snapshot_id} ({purpose}, volumen: {volume_id})...")
+        subprocess.run(
+            ["aws", "ec2", "wait", "snapshot-completed", "--region", region, "--snapshot-ids", snapshot_id],
+            check=True,
+        )
+        print(f"[OK] Snapshot {snapshot_id} completado.")
+        return {"volume_id": volume_id, "snapshot_id": snapshot_id}
+
+    root_info = snapshot_volume(root_volume_id, "root")
+    jenkins_info = root_info if jenkins_is_root else snapshot_volume(jenkins_volume_id, "jenkins-home")
+    return {"root": root_info, "jenkins": jenkins_info}
 
 
 def set_quiet_down(base_url: str, user: str, token: str, enable: bool) -> None:
@@ -253,78 +272,89 @@ def run_healthcheck(base_url: str, user: str, token: str, service_name: str, pat
 
 def execute_rollback(ec2_meta: dict, ebs_info: dict, device_name: str, jenkins_home: str, service_name: str, is_dedicated_vol: bool) -> str:
     """
-    Ejecuta rollback automático si JENKINS_HOME reside en un volumen EBS dedicado,
-    o detiene el servicio y retorna instrucciones exactas si es el volumen root.
+    Restaura JENKINS_HOME si está dedicado y solicita a EC2 reemplazar el volumen root.
     """
     region = ec2_meta["region"]
     instance_id = ec2_meta["instance_id"]
-    az = ec2_meta["az"]
-    old_vol = ebs_info["volume_id"]
-    snap_id = ebs_info["snapshot_id"]
+    jenkins_info = ebs_info["jenkins"]
+    root_info = ebs_info["root"]
 
     subprocess.run(["systemctl", "stop", service_name], check=False)
 
-    if not is_dedicated_vol:
-        return (
-            f"Servicio '{service_name}' detenido para evitar corrupción.\n"
-            f"El volumen {old_vol} es el volumen ROOT de {instance_id} y no puede desmontarse en caliente.\n"
-            f"Snapshot listo para restaurar: {snap_id} (Región: {region}, AZ: {az})."
+    data_rollback = "JENKINS_HOME comparte el volumen root; se restaurará junto con el sistema."
+    if is_dedicated_vol:
+        old_vol = jenkins_info["volume_id"]
+        data_snapshot_id = jenkins_info["snapshot_id"]
+        subprocess.run(["umount", "-l", jenkins_home], check=True)
+        subprocess.run(
+            ["aws", "ec2", "detach-volume", "--region", region, "--volume-id", old_vol],
+            check=True,
+        )
+        subprocess.run(
+            ["aws", "ec2", "wait", "volume-available", "--region", region, "--volume-ids", old_vol],
+            check=True,
         )
 
-    # Rollback automatizado en caliente para volumen de datos dedicado
-    subprocess.run(["umount", "-l", jenkins_home], check=True)
-    subprocess.run(
-        ["aws", "ec2", "detach-volume", "--region", region, "--volume-id", old_vol],
-        check=True,
-    )
-    subprocess.run(
-        ["aws", "ec2", "wait", "volume-available", "--region", region, "--volume-ids", old_vol],
-        check=True,
-    )
+        new_vol_res = subprocess.run(
+            [
+                "aws", "ec2", "create-volume",
+                "--region", region,
+                "--availability-zone", ec2_meta["az"],
+                "--snapshot-id", data_snapshot_id,
+                "--volume-type", "gp3",
+                "--query", "VolumeId",
+                "--output", "text",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        new_vol_id = new_vol_res.stdout.strip()
+        subprocess.run(
+            ["aws", "ec2", "wait", "volume-available", "--region", region, "--volume-ids", new_vol_id],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "aws", "ec2", "attach-volume",
+                "--region", region,
+                "--volume-id", new_vol_id,
+                "--instance-id", instance_id,
+                "--device", device_name,
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["aws", "ec2", "wait", "volume-in-use", "--region", region, "--volume-ids", new_vol_id],
+            check=True,
+        )
+        subprocess.run(["mount", device_name, jenkins_home], check=True)
+        data_rollback = (
+            f"JENKINS_HOME restaurado desde {data_snapshot_id} en el volumen {new_vol_id}; "
+            "Jenkins permanecerá detenido durante el reemplazo del root."
+        )
 
-    new_vol_res = subprocess.run(
+    root_task_res = subprocess.run(
         [
-            "aws", "ec2", "create-volume",
+            "aws", "ec2", "create-replace-root-volume-task",
             "--region", region,
-            "--availability-zone", az,
-            "--snapshot-id", snap_id,
-            "--volume-type", "gp3",
-            "--query", "VolumeId",
+            "--instance-id", instance_id,
+            "--snapshot-id", root_info["snapshot_id"],
+            "--no-delete-replaced-root-volume",
+            "--query", "ReplaceRootVolumeTask.ReplaceRootVolumeTaskId",
             "--output", "text",
         ],
         capture_output=True,
         text=True,
         check=True,
     )
-    new_vol_id = new_vol_res.stdout.strip()
-
-    subprocess.run(
-        ["aws", "ec2", "wait", "volume-available", "--region", region, "--volume-ids", new_vol_id],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "aws", "ec2", "attach-volume",
-            "--region", region,
-            "--volume-id", new_vol_id,
-            "--instance-id", instance_id,
-            "--device", device_name,
-        ],
-        check=True,
-    )
-    subprocess.run(
-        ["aws", "ec2", "wait", "volume-in-use", "--region", region, "--volume-ids", new_vol_id],
-        check=True,
-    )
-
-    subprocess.run(["mount", device_name, jenkins_home], check=True)
-    subprocess.run(["systemctl", "start", service_name], check=True)
-
+    root_task_id = root_task_res.stdout.strip()
     return (
-        f"ROLLBACK DE DISCO COMPLETADO AUTOMÁTICAMENTE.\n"
-        f"- Volumen anterior desmontado: {old_vol}\n"
-        f"- Nuevo volumen restaurado desde Snapshot {snap_id}: {new_vol_id}\n"
-        f"- Servicio '{service_name}' reiniciado sobre {jenkins_home}."
+        "ROLLBACK DEL VOLUMEN ROOT SOLICITADO A EC2. La instancia se reiniciará automáticamente; "
+        "el volumen root reemplazado se conserva para recuperación manual.\n"
+        f"- Snapshot root: {root_info['snapshot_id']}\n"
+        f"- Tarea de reemplazo: {root_task_id}\n"
+        f"- {data_rollback}"
     )
 
 
@@ -353,7 +383,7 @@ def main() -> None:
     is_dedicated = get_env("IS_DEDICATED_DATA_VOLUME", "true").lower() == "true"
 
     ec2_meta = get_ec2_metadata()
-    ebs_info = create_ebs_snapshot(ec2_meta, device_name)
+    ebs_info = create_ebs_snapshot(ec2_meta, device_name, is_dedicated)
 
     patch_start_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -362,7 +392,7 @@ def main() -> None:
     except Exception as exc:
         rollback_msg = execute_rollback(ec2_meta, ebs_info, device_name, jenkins_home, service_name, is_dedicated)
         send_alert_email(
-            subject="[CRITICAL] Fallo durante parcheo de Jenkins - Rollback ejecutado",
+            subject="[CRITICAL] Fallo durante parcheo de Jenkins - Rollback solicitado",
             body=f"Error aplicando actualizaciones: {exc}\n\n{rollback_msg}",
         )
         sys.exit(1)
@@ -377,7 +407,8 @@ def main() -> None:
             subject="[OK] Ventana de parcheo Jenkins completada exitosamente",
             body=(
                 f"Las actualizaciones aprobadas fueron aplicadas y verificadas.\n"
-                f"Snapshot preventivo generado: {ebs_info['snapshot_id']}\n"
+                f"Snapshots preventivos generados: root={ebs_info['root']['snapshot_id']}, "
+                f"JENKINS_HOME={ebs_info['jenkins']['snapshot_id']}\n"
                 f"Resultado Healthcheck: {details}"
             ),
         )
@@ -385,7 +416,7 @@ def main() -> None:
     else:
         rollback_msg = execute_rollback(ec2_meta, ebs_info, device_name, jenkins_home, service_name, is_dedicated)
         send_alert_email(
-            subject="[CRITICAL] Healthcheck de Jenkins fallido - Rollback ejecutado",
+            subject="[CRITICAL] Healthcheck de Jenkins fallido - Rollback solicitado",
             body=f"Motivo del fallo: {details}\n\n{rollback_msg}",
         )
         print(f"[CRITICAL] {details}\n{rollback_msg}", file=sys.stderr)
