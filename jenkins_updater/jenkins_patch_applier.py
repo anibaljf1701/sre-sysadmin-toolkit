@@ -243,9 +243,12 @@ def run_healthcheck(base_url: str, user: str, token: str, service_name: str, pat
             )
             with urllib.request.urlopen(api_req, timeout=10) as api_resp:
                 payload = json.loads(api_resp.read().decode("utf-8"))
-                if payload.get("quietingDown") is True:
-                    set_quiet_down(base_url, user, token, enable=False)
-                    last_error = "Jenkins sigue en modo quietingDown"
+                if payload.get("quietingDown") is not False:
+                    if payload.get("quietingDown") is True:
+                        set_quiet_down(base_url, user, token, enable=False)
+                        last_error = "Jenkins sigue en modo quietingDown"
+                    else:
+                        last_error = "La API no confirmó quietingDown=false"
                     time.sleep(10)
                     continue
 
@@ -256,6 +259,12 @@ def run_healthcheck(base_url: str, user: str, token: str, service_name: str, pat
                 text=True,
                 check=False,
             )
+            if journal_res.returncode != 0:
+                return False, (
+                    f"journalctl falló con código {journal_res.returncode}: "
+                    f"{journal_res.stderr.strip()}"
+                )
+
             fatal_markers = ("Failed Loading plugin", "HudsonFailedToLoad", "SEVERE: Error injecting")
             for marker in fatal_markers:
                 if marker in journal_res.stdout:
