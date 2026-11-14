@@ -380,7 +380,7 @@ Los puertos publicados por Compose escuchan en todas las interfaces por defecto.
 
 La herramienta `jenkins_updater/` está diseñada para Jenkins instalado como servicio Linux en una instancia EC2 (systemd), con Jenkins Core administrado por el gestor de paquetes y plugins instalados en Jenkins. No administra Jenkins en contenedores; ese caso requiere otro flujo.
 
-El checker corre diariamente a la 01:00, consulta actualizaciones del sistema/Core y plugins, escribe un manifiesto de candidatas y envía el reporte por email únicamente si encuentra cambios. El SRE debe editar el manifiesto y aprobar explícitamente Core (`approved_core_update: true`) y/o agregar nombres a `approved_os_packages` y `approved_plugins`. Los campos aprobados se generan vacíos; si nadie los modifica, el aplicador no ejecuta actualizaciones. El aplicador corre a las 12:30, crea un snapshot EBS, aplica las selecciones, reinicia Jenkins y ejecuta el healthcheck configurado en el script.
+El checker corre diariamente a la 01:00, consulta actualizaciones del sistema/Core y plugins, escribe un manifiesto de candidatas y envía el reporte por email únicamente si encuentra cambios. Para aprobar Core, el SRE debe activar `approved_core_update` y copiar en `approved_core_version` la versión exacta de `available_core_update.target_version`; el aplicador aborta si falta o no coincide. Para SO y plugins, se agregan los nombres a `approved_os_packages` y `approved_plugins`. Los campos aprobados se generan vacíos; si nadie los modifica, el aplicador no ejecuta actualizaciones. El aplicador corre a las 12:30, crea un snapshot EBS, aplica las selecciones, reinicia Jenkins y ejecuta el healthcheck configurado en el script.
 
 ### Requisitos y permisos
 
@@ -412,7 +412,7 @@ El reporte por correo muestra las versiones destino detectadas para Core y paque
 
 Antes de aplicar cambios, el aplicador crea y espera snapshots del volumen root y del volumen indicado por `JENKINS_EBS_DEVICE` si `JENKINS_HOME` está dedicado. Si falla el parcheo o el healthcheck, restaura primero el volumen de datos dedicado y solicita a EC2 reemplazar el volumen root desde su snapshot. EC2 reinicia automáticamente la instancia; conserva el volumen root reemplazado y el aviso incluye el ID de la tarea de reemplazo. Para que EC2 acepte la operación, la instancia debe estar en ejecución y usar un volumen EBS como root. Configura `IS_DEDICATED_DATA_VOLUME` y `JENKINS_EBS_DEVICE` según el mapeo real de discos, y valida permisos, diseño de volúmenes y procedimiento de recuperación antes de habilitar actualizaciones en producción.
 
-Las aprobaciones identifican paquetes y plugins por nombre; no fijan todavía la versión objetivo que se revisó en el reporte. El gestor de paquetes o Update Center podría ofrecer otra versión al aplicar. Considera esto una limitación operativa hasta que el manifiesto y el aplicador incorporen validación de versiones.
+La versión aprobada de Jenkins Core queda fijada a la candidata del manifiesto y el gestor recibe una especificación exacta (`jenkins=<versión>` en apt o `jenkins-<versión>` en dnf/yum). Las aprobaciones de paquetes del SO y plugins todavía se identifican por nombre y pueden resolver a una versión más reciente al aplicar.
 
 ## Estructura del repositorio
 

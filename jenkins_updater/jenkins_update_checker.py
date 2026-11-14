@@ -159,7 +159,8 @@ def main() -> None:
         "jenkins_url": jenkins_url,
         "instructions": (
             "Las actualizaciones detectadas son candidatas, no aprobaciones. "
-            "Para aprobar Core, cambie approved_core_update a true. "
+            "Para aprobar Core, cambie approved_core_update a true y copie la version exacta de "
+            "available_core_update.target_version en approved_core_version. "
             "Agregue unicamente los nombres autorizados a approved_os_packages "
             "y approved_plugins. Sin cambios explicitos, no se aplicara nada."
         ),
@@ -167,6 +168,7 @@ def main() -> None:
         "available_os_packages": sys_updates["os_packages"],
         "available_plugins": plugin_updates,
         "approved_core_update": False,
+        "approved_core_version": "",
         "approved_os_packages": [],
         "approved_plugins": [],
     }
@@ -182,7 +184,8 @@ def main() -> None:
         "",
         "ACCIÓN REQUERIDA ANTES DE LAS 12:30:",
         f"Edite '{manifest_path}' para aprobar explicitamente solo las actualizaciones elegidas.",
-        "Cambie approved_core_update a true para Core y agregue nombres a approved_os_packages o approved_plugins.",
+        "Para Core, cambie approved_core_update a true y copie la version candidata exacta en approved_core_version.",
+        "Agregue nombres a approved_os_packages o approved_plugins para aprobar esas actualizaciones.",
         "Las listas aprobadas quedan vacias por defecto; si no se editan, la ejecucion de las 12:30 abortara.",
         "",
         "1. JENKINS CORE:",

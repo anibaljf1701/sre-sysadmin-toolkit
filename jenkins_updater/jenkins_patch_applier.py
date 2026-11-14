@@ -68,9 +68,32 @@ def validate_manifest(manifest_path: Path) -> dict:
         print(f"[ABORT] Manifiesto inválido (JSON corrupto): {exc}", file=sys.stderr)
         sys.exit(1)
 
-    has_core = bool(data.get("approved_core_update"))
-    has_os = len(data.get("approved_os_packages") or []) > 0
+    has_core = data.get("approved_core_update") is True
+    approved_core_version = data.get("approved_core_version")
+    approved_os_packages = data.get("approved_os_packages") or []
+    has_os = len(approved_os_packages) > 0
     has_plugins = len(data.get("approved_plugins") or []) > 0
+
+    if has_core:
+        available_core = data.get("available_core_update") or {}
+        candidate_version = available_core.get("target_version")
+        if not isinstance(approved_core_version, str) or not approved_core_version.strip():
+            print("[ABORT] Para aprobar Jenkins Core, defina approved_core_version con la versión candidata exacta.", file=sys.stderr)
+            sys.exit(1)
+        if approved_core_version != candidate_version:
+            print(
+                f"[ABORT] approved_core_version ({approved_core_version}) debe coincidir con "
+                f"available_core_update.target_version ({candidate_version}). Regenere el manifiesto si está desactualizado.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    elif approved_core_version not in (None, ""):
+        print("[ABORT] approved_core_version está definido pero approved_core_update no está aprobado.", file=sys.stderr)
+        sys.exit(1)
+
+    if any(isinstance(package, str) and package.lower() == "jenkins" for package in approved_os_packages):
+        print("[ABORT] Apruebe Jenkins Core con approved_core_update y approved_core_version, no en approved_os_packages.", file=sys.stderr)
+        sys.exit(1)
 
     if not (has_core or has_os or has_plugins):
         print("[ABORT] El manifiesto no contiene paquetes ni plugins aprobados. Abortando ejecución.")
@@ -179,22 +202,37 @@ def apply_updates(approved: dict, base_url: str, user: str, token: str, cli_jar:
 
     # 1. Paquetes de Sistema y Jenkins Core
     packages_to_upgrade = list(approved.get("approved_os_packages") or [])
-    if approved.get("approved_core_update"):
-        packages_to_upgrade.append("jenkins")
+    approved_core = approved.get("approved_core_update") is True
+    core_version = approved.get("approved_core_version") if approved_core else None
 
-    if packages_to_upgrade:
-        print(f"[INFO] Actualizando paquetes del sistema/core: {', '.join(packages_to_upgrade)}")
+    if packages_to_upgrade or approved_core:
+        if approved_core and not core_version:
+            raise ValueError("approved_core_version es obligatorio al aprobar Jenkins Core")
+
+        package_summary = ", ".join(packages_to_upgrade)
+        if approved_core:
+            package_summary = f"{package_summary}, " if package_summary else ""
+            package_summary += f"jenkins={core_version}"
+        print(f"[INFO] Actualizando paquetes del sistema/core: {package_summary}")
         if shutil.which("apt-get"):
             env = os.environ.copy()
             env["DEBIAN_FRONTEND"] = "noninteractive"
+            packages = packages_to_upgrade.copy()
+            if approved_core:
+                packages.append(f"jenkins={core_version}")
             subprocess.run(
-                ["apt-get", "install", "-y", "--only-upgrade", *packages_to_upgrade],
+                ["apt-get", "install", "-y", "--only-upgrade", *packages],
                 env=env,
                 check=True,
             )
         elif shutil.which("dnf") or shutil.which("yum"):
             pkg_mgr = "dnf" if shutil.which("dnf") else "yum"
-            subprocess.run([pkg_mgr, "update", "-y", *packages_to_upgrade], check=True)
+            packages = packages_to_upgrade.copy()
+            if approved_core:
+                packages.append(f"jenkins-{core_version}")
+            subprocess.run([pkg_mgr, "update", "-y", *packages], check=True)
+        else:
+            raise RuntimeError("No se encontró apt-get, dnf ni yum para aplicar las actualizaciones aprobadas")
 
     # 2. Plugins de Jenkins vía CLI
     plugins = approved.get("approved_plugins") or []
